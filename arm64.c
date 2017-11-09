@@ -72,6 +72,7 @@ static void arm64_cmd_mach(void);
 static void arm64_display_machine_stats(void);
 static int arm64_get_smp_cpus(void);
 static void arm64_clear_machdep_cache(void);
+static int arm64_on_process_stack(struct bt_info *, ulong);
 static int arm64_in_alternate_stack(int, ulong);
 static int arm64_on_irq_stack(int, ulong);
 static void arm64_set_irq_stack(struct bt_info *);
@@ -611,6 +612,7 @@ arm64_dump_machdep_table(ulong arg)
 	fprintf(fp, "        exp_entry2_end: %lx\n", ms->exp_entry2_end);
 	fprintf(fp, "       panic_task_regs: %lx\n", (ulong)ms->panic_task_regs);
 	fprintf(fp, "    user_eframe_offset: %ld\n", ms->user_eframe_offset);
+	fprintf(fp, "    kern_eframe_offset: %ld\n", ms->kern_eframe_offset);
 	fprintf(fp, "         PTE_PROT_NONE: %lx\n", ms->PTE_PROT_NONE);
 	fprintf(fp, "              PTE_FILE: ");
 	if (ms->PTE_FILE)
@@ -1333,34 +1335,64 @@ arm64_irq_stack_init(void)
 	int i;
 	struct syment *sp;
 	struct gnu_request request, *req;
-	req = &request;
 	struct machine_specific *ms = machdep->machspec;
+	ulong p;
+	req = &request;
 
-	if (!symbol_exists("irq_stack") ||
-	    !(sp = per_cpu_symbol_search("irq_stack")) ||
-	    !get_symbol_type("irq_stack", NULL, req) ||
-	    (req->typecode != TYPE_CODE_ARRAY) ||
-	    (req->target_typecode != TYPE_CODE_INT))
-		return;
+	if (symbol_exists("irq_stack") &&
+	    (sp = per_cpu_symbol_search("irq_stack")) &&
+	    get_symbol_type("irq_stack", NULL, req)) {
+		/* before v4.14 or CONFIG_VMAP_STACK disabled */
+		if (CRASHDEBUG(1)) {
+			fprintf(fp, "irq_stack: \n");
+			fprintf(fp, "  type: %s\n",
+				(req->typecode == TYPE_CODE_ARRAY) ?
+						"TYPE_CODE_ARRAY" : "other");
+			fprintf(fp, "  target_typecode: %s\n",
+				req->target_typecode == TYPE_CODE_INT ?
+						"TYPE_CODE_INT" : "other");
+			fprintf(fp, "  target_length: %ld\n",
+						req->target_length);
+			fprintf(fp, "  length: %ld\n", req->length);
+		}
 
-	if (CRASHDEBUG(1)) {
-		fprintf(fp, "irq_stack: \n");
-		fprintf(fp, "  type: %s\n", 
-			(req->typecode == TYPE_CODE_ARRAY) ? "TYPE_CODE_ARRAY" : "other");
-		fprintf(fp, "  target_typecode: %s\n", 
-			req->target_typecode == TYPE_CODE_INT ? "TYPE_CODE_INT" : "other");
-		fprintf(fp, "  target_length: %ld\n", req->target_length);
-		fprintf(fp, "  length: %ld\n", req->length);
-	}
+		if (!(ms->irq_stacks = (ulong *)malloc((size_t)(kt->cpus * sizeof(ulong)))))
+			error(FATAL, "cannot malloc irq_stack addresses\n");
+		ms->irq_stack_size = req->length;
+		machdep->flags |= IRQ_STACKS;
 
-	ms->irq_stack_size = req->length;
-	if (!(ms->irq_stacks = (ulong *)malloc((size_t)(kt->cpus * sizeof(ulong)))))
-		error(FATAL, "cannot malloc irq_stack addresses\n");
+		for (i = 0; i < kt->cpus; i++)
+			ms->irq_stacks[i] = kt->__per_cpu_offset[i] + sp->value;
+	} else if (symbol_exists("irq_stack_ptr") &&
+	    (sp = per_cpu_symbol_search("irq_stack_ptr")) &&
+	    get_symbol_type("irq_stack_ptr", NULL, req)) {
+		/* v4.14 and later with CONFIG_VMAP_STACK enabled */
+		if (CRASHDEBUG(1)) {
+			fprintf(fp, "irq_stack_ptr: \n");
+			fprintf(fp, "  type: %x, %s\n",
+				(int)req->typecode,
+				(req->typecode == TYPE_CODE_PTR) ?
+						"TYPE_CODE_PTR" : "other");
+			fprintf(fp, "  target_typecode: %x, %s\n",
+				(int)req->target_typecode,
+				req->target_typecode == TYPE_CODE_INT ?
+						"TYPE_CODE_INT" : "other");
+			fprintf(fp, "  target_length: %ld\n",
+						req->target_length);
+			fprintf(fp, "  length: %ld\n", req->length);
+		}
 
-	for (i = 0; i < kt->cpus; i++)
-		ms->irq_stacks[i] = kt->__per_cpu_offset[i] + sp->value;
+		if (!(ms->irq_stacks = (ulong *)malloc((size_t)(kt->cpus * sizeof(ulong)))))
+			error(FATAL, "cannot malloc irq_stack addresses\n");
+		ms->irq_stack_size = ARM64_IRQ_STACK_SIZE;
+		machdep->flags |= IRQ_STACKS;
 
-	machdep->flags |= IRQ_STACKS;
+		for (i = 0; i < kt->cpus; i++) {
+			p = kt->__per_cpu_offset[i] + sp->value;
+			readmem(p, KVADDR, &(ms->irq_stacks[i]), sizeof(ulong),
+			    "IRQ stack pointer", RETURN_ON_ERROR);
+		}
+	} 
 }
 
 /*
@@ -1379,10 +1411,13 @@ arm64_stackframe_init(void)
 	MEMBER_OFFSET_INIT(elf_prstatus_pr_pid, "elf_prstatus", "pr_pid");
 	MEMBER_OFFSET_INIT(elf_prstatus_pr_reg, "elf_prstatus", "pr_reg");
 
-	if (MEMBER_EXISTS("pt_regs", "stackframe")) 
+	if (MEMBER_EXISTS("pt_regs", "stackframe")) {
 		machdep->machspec->user_eframe_offset = SIZE(pt_regs);
-	else
+		machdep->machspec->kern_eframe_offset = SIZE(pt_regs) - 16;
+	} else {
 		machdep->machspec->user_eframe_offset = SIZE(pt_regs) + 16;
+		machdep->machspec->kern_eframe_offset = SIZE(pt_regs);
+	}
 
 	machdep->machspec->__exception_text_start = 
 		symbol_value("__exception_text_start");
@@ -1472,6 +1507,7 @@ arm64_stackframe_init(void)
 #define USER_MODE   (2)
 
 #define USER_EFRAME_OFFSET (machdep->machspec->user_eframe_offset)
+#define KERN_EFRAME_OFFSET (machdep->machspec->kern_eframe_offset)
 
 /*
  * PSR bits
@@ -1750,11 +1786,20 @@ arm64_display_full_frame(struct bt_info *bt, ulong sp)
 	if (bt->frameptr == sp)
 		return;
 
-	if (!INSTACK(sp, bt) || !INSTACK(bt->frameptr, bt)) {
-		if (sp == 0)
-			sp = bt->stacktop - USER_EFRAME_OFFSET;
-		else
-			return;
+	if (INSTACK(bt->frameptr, bt)) {
+		if (INSTACK(sp, bt)) {
+			; /* normal case */
+		} else {
+			if (sp == 0)
+				/* interrupt in user mode */
+				sp = bt->stacktop - USER_EFRAME_OFFSET;
+			else
+				/* interrupt in kernel mode */
+				sp = bt->stacktop;
+		}
+	} else { 
+		/* This is a transition case from irq to process stack. */
+		return;
 	}
 
 	words = (sp - bt->frameptr) / sizeof(ulong);
@@ -1860,6 +1905,41 @@ arm64_unwind_frame(struct bt_info *bt, struct arm64_stackframe *frame)
 	if ((frame->fp == 0) && (frame->pc == 0))
 		return FALSE;
 
+	if (!(machdep->flags & IRQ_STACKS))
+		return TRUE;
+
+	if (!(machdep->flags & IRQ_STACKS))
+		return TRUE;
+
+	if (machdep->flags & UNW_4_14) {
+		if ((bt->flags & BT_IRQSTACK) &&
+		    !arm64_on_irq_stack(bt->tc->processor, frame->fp)) {
+			if (arm64_on_process_stack(bt, frame->fp)) {
+				arm64_set_process_stack(bt);
+
+				frame->sp = frame->fp - KERN_EFRAME_OFFSET;
+				/*
+				 * for switch_stack
+				 * fp still points to irq stack
+				 */
+				bt->bptr = fp;
+				/*
+				 * for display_full_frame
+				 * sp points to process stack
+				 *
+				 * If we want to see pt_regs,
+				 * comment out the below.
+				 * bt->frameptr = frame->sp;
+				 */
+			} else {
+				/* irq -> user */
+				return FALSE;
+			}
+		}
+
+		return TRUE;
+	}
+
 	/*
 	 * The kernel's manner of determining the end of the IRQ stack:
 	 *
@@ -1872,29 +1952,27 @@ arm64_unwind_frame(struct bt_info *bt, struct arm64_stackframe *frame)
 	 *  irq_stack_ptr = IRQ_STACK_PTR(raw_smp_processor_id());
 	 *  orig_sp = IRQ_STACK_TO_TASK_STACK(irq_stack_ptr);   (pt_regs pointer on process stack)
 	 */
-	if (machdep->flags & IRQ_STACKS) {
-		ms = machdep->machspec;
-		irq_stack_ptr = ms->irq_stacks[bt->tc->processor] + ms->irq_stack_size - 16;
+	ms = machdep->machspec;
+	irq_stack_ptr = ms->irq_stacks[bt->tc->processor] + ms->irq_stack_size - 16;
 
-		if (frame->sp == irq_stack_ptr) {
-			orig_sp = GET_STACK_ULONG(irq_stack_ptr - 8);
-			arm64_set_process_stack(bt);
-			if (INSTACK(orig_sp, bt) && (INSTACK(frame->fp, bt) || (frame->fp == 0))) {
-				ptregs = (struct arm64_pt_regs *)&bt->stackbuf[(ulong)(STACK_OFFSET_TYPE(orig_sp))];
-				frame->sp = orig_sp;
-				frame->pc = ptregs->pc;
-				bt->bptr = fp;
-				if (CRASHDEBUG(1))
-					error(INFO, 
-					    "arm64_unwind_frame: switch stacks: fp: %lx sp: %lx  pc: %lx\n",
-						frame->fp, frame->sp, frame->pc);
-			} else {
-				error(WARNING, 
-				    "arm64_unwind_frame: on IRQ stack: oriq_sp: %lx%s fp: %lx%s\n",
-					orig_sp, INSTACK(orig_sp, bt) ? "" : " (?)",
-					frame->fp, INSTACK(frame->fp, bt) ? "" : " (?)");
-				return FALSE;
-			}
+	if (frame->sp == irq_stack_ptr) {
+		orig_sp = GET_STACK_ULONG(irq_stack_ptr - 8);
+		arm64_set_process_stack(bt);
+		if (INSTACK(orig_sp, bt) && (INSTACK(frame->fp, bt) || (frame->fp == 0))) {
+			ptregs = (struct arm64_pt_regs *)&bt->stackbuf[(ulong)(STACK_OFFSET_TYPE(orig_sp))];
+			frame->sp = orig_sp;
+			frame->pc = ptregs->pc;
+			bt->bptr = fp;
+			if (CRASHDEBUG(1))
+				error(INFO,
+				    "arm64_unwind_frame: switch stacks: fp: %lx sp: %lx  pc: %lx\n",
+					frame->fp, frame->sp, frame->pc);
+		} else {
+			error(WARNING,
+			    "arm64_unwind_frame: on IRQ stack: oriq_sp: %lx%s fp: %lx%s\n",
+				orig_sp, INSTACK(orig_sp, bt) ? "" : " (?)",
+				frame->fp, INSTACK(frame->fp, bt) ? "" : " (?)");
+			return FALSE;
 		}
 	}
 
@@ -2211,6 +2289,11 @@ arm64_back_trace_cmd(struct bt_info *bt)
 	FILE *ofp;
 
 	if (bt->flags & BT_OPT_BACK_TRACE) {
+		if (machdep->flags & UNW_4_14) {
+			option_not_supported('o');
+			return;
+		}
+
 		arm64_back_trace_cmd_v2(bt);
 		return;
 	}
@@ -2272,7 +2355,7 @@ arm64_back_trace_cmd(struct bt_info *bt)
 			goto complete_user;
 
 		if (DUMPFILE() && is_task_active(bt->task)) {
-			exception_frame = stackframe.fp - SIZE(pt_regs);
+			exception_frame = stackframe.fp - KERN_EFRAME_OFFSET;
 			if (arm64_is_kernel_exception_frame(bt, exception_frame))
 				arm64_print_exception_frame(bt, exception_frame, 
 					KERNEL_MODE, ofp);
@@ -2304,11 +2387,11 @@ arm64_back_trace_cmd(struct bt_info *bt)
 		if (arm64_in_exception_text(bt->instptr) && INSTACK(stackframe.fp, bt)) {
 			if (!(bt->flags & BT_IRQSTACK) ||
 			    (((stackframe.sp + SIZE(pt_regs)) < bt->stacktop)))
-				exception_frame = stackframe.fp - SIZE(pt_regs);
+				exception_frame = stackframe.fp - KERN_EFRAME_OFFSET;
 		}
 
 		if ((bt->flags & BT_IRQSTACK) &&
-		    !arm64_on_irq_stack(bt->tc->processor, stackframe.sp)) {
+		    !arm64_on_irq_stack(bt->tc->processor, stackframe.fp)) {
 			bt->flags &= ~BT_IRQSTACK;
 			if (arm64_switch_stack(bt, &stackframe, ofp) == USER_MODE)
 				break;
@@ -2669,7 +2752,9 @@ arm64_switch_stack(struct bt_info *bt, struct arm64_stackframe *frame, FILE *ofp
 	if (frame->fp == 0)
 		return USER_MODE;
 
-	arm64_print_exception_frame(bt, frame->sp, KERNEL_MODE, ofp);
+	if (!(machdep->flags & UNW_4_14))
+		arm64_print_exception_frame(bt, frame->sp, KERNEL_MODE, ofp);
+
 	return KERNEL_MODE;
 }
 
@@ -3360,6 +3445,20 @@ arm64_clear_machdep_cache(void) {
 	 * TBD: probably not necessary...
 	 */
 	return;
+}
+
+static int
+arm64_on_process_stack(struct bt_info *bt, ulong stkptr)
+{
+	ulong stackbase, stacktop;
+
+	stackbase = GET_STACKBASE(bt->task);
+	stacktop = GET_STACKTOP(bt->task);
+
+	if ((stkptr >= stackbase) && (stkptr < stacktop))
+		return TRUE;
+
+	return FALSE;
 }
 
 static int
