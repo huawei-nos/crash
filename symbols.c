@@ -1,8 +1,8 @@
 /* symbols.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002-2017 David Anderson
- * Copyright (C) 2002-2017 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002-2018 David Anderson
+ * Copyright (C) 2002-2018 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -1004,10 +1004,9 @@ symbol_value_from_proc_kallsyms(char *symname)
 
 	found = FALSE;
 	while (!found && fgets(buf, BUFSIZE, kp) &&
-	    (parse_line(buf, kallsyms) == 3) && 
-	    hexadecimal(kallsyms[0], 0)) {
-
-		if (STREQ(kallsyms[2], symname)) {
+	    (parse_line(buf, kallsyms) == 3)) {
+		if (hexadecimal(kallsyms[0], 0) && 
+		    STREQ(kallsyms[2], symname)) {
 			kallsym = htol(kallsyms[0], RETURN_ON_ERROR, NULL);
 			found = TRUE;
 			break;
@@ -3072,10 +3071,14 @@ dump_symbol_table(void)
 		fprintf(fp, "divide_error_vmlinux: %lx\n", st->divide_error_vmlinux);
 		fprintf(fp, "   idt_table_vmlinux: %lx\n", st->idt_table_vmlinux);
 		fprintf(fp, "saved_command_line_vmlinux: %lx\n", st->saved_command_line_vmlinux);
+		fprintf(fp, "    pti_init_vmlinux: %lx\n", st->pti_init_vmlinux);
+		fprintf(fp, " kaiser_init_vmlinux: %lx\n", st->kaiser_init_vmlinux);
 	} else {
 		fprintf(fp, "divide_error_vmlinux: (unused)\n");
 		fprintf(fp, "   idt_table_vmlinux: (unused)\n");
 		fprintf(fp, "saved_command_line_vmlinux: (unused)\n");
+		fprintf(fp, "    pti_init_vmlinux: (unused)\n");
+		fprintf(fp, " kaiser_init_vmlinux: (unused)\n");
 	}
 
         fprintf(fp, "    symval_hash[%d]: %lx\n", SYMVAL_HASH,
@@ -12306,6 +12309,11 @@ numeric_forward(const void *P_x, const void *P_y)
 			st->saved_command_line_vmlinux = valueof(x);
 		else if (STREQ(y->name, "saved_command_line"))
 			st->saved_command_line_vmlinux = valueof(y);
+
+		if (STREQ(x->name, "pti_init"))
+			st->pti_init_vmlinux = valueof(x);
+		else if (STREQ(y->name, "kaiser_init"))
+			st->kaiser_init_vmlinux = valueof(y);
 	}
 
   	xs = bfd_get_section(x);

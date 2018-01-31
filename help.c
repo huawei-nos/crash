@@ -1,8 +1,8 @@
 /* help.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002-2017 David Anderson
- * Copyright (C) 2002-2017 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002-2018 David Anderson
+ * Copyright (C) 2002-2018 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -159,12 +159,14 @@ char *program_usage_info[] = {
     "    X86_64:",
     "      phys_base=<physical-address>",
     "      irq_eframe_link=<value>",
+    "      irq_stack_gap=<value>",
     "      max_physmem_bits=<value>",
     "      kernel_image_size=<value>",
     "      vm=orig       (pre-2.6.11 virtual memory address ranges)",
     "      vm=2.6.11     (2.6.11 and later virtual memory address ranges)",
     "      vm=xen        (Xen kernel virtual memory address ranges)",
     "      vm=xen-rhel4  (RHEL4 Xen kernel virtual address ranges)",
+    "      vm=5level     (5-level page tables)",
     "    PPC64:",
     "      vm=orig",
     "      vm=2.6.14     (4-level page tables)",
