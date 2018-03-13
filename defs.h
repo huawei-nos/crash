@@ -1030,6 +1030,7 @@ struct machdep_table {
         int (*verify_line_number)(ulong, ulong, ulong);
         void (*get_irq_affinity)(int);
         void (*show_interrupts)(int, ulong *);
+	int (*is_page_ptr)(ulong, physaddr_t *);
 };
 
 /*
@@ -1143,6 +1144,7 @@ extern struct machdep_table *machdep;
 #define FOREACH_G_FLAG   (0x8000000)
 #define FOREACH_F_FLAG2 (0x10000000)
 #define FOREACH_y_FLAG  (0x20000000)
+#define FOREACH_GLEADER (0x40000000)
 
 #define FOREACH_PS_EXCLUSIVE \
   (FOREACH_g_FLAG|FOREACH_a_FLAG|FOREACH_t_FLAG|FOREACH_c_FLAG|FOREACH_p_FLAG|FOREACH_l_FLAG|FOREACH_r_FLAG|FOREACH_m_FLAG)
@@ -2368,6 +2370,7 @@ struct vm_table {                /* kernel VM-related data */
 		ulong mask;
 		char *name;
 	} *pageflags_data;
+	ulong max_mem_section_nr;
 };
 
 #define NODES                       (0x1)
@@ -3137,6 +3140,8 @@ struct machine_specific {
 	ulong user_eframe_offset;
 	/* for v4.14 or later */
 	ulong kern_eframe_offset;
+	ulong machine_kexec_start;
+	ulong machine_kexec_end;
 };
 
 struct arm64_stackframe {
@@ -4614,8 +4619,9 @@ extern long _ZOMBIE_;
 #define PS_MSECS      (0x20000)
 #define PS_SUMMARY    (0x40000)
 #define PS_POLICY     (0x80000)
+#define PS_ACTIVE    (0x100000)
 
-#define PS_EXCLUSIVE (PS_TGID_LIST|PS_ARGV_ENVP|PS_TIMES|PS_CHILD_LIST|PS_PPID_LIST|PS_LAST_RUN|PS_RLIMIT|PS_MSECS|PS_SUMMARY)
+#define PS_EXCLUSIVE (PS_TGID_LIST|PS_ARGV_ENVP|PS_TIMES|PS_CHILD_LIST|PS_PPID_LIST|PS_LAST_RUN|PS_RLIMIT|PS_MSECS|PS_SUMMARY|PS_ACTIVE)
 
 #define MAX_PS_ARGS    (100)   /* maximum command-line specific requests */
 
@@ -5096,6 +5102,7 @@ ulong vm_area_dump(ulong, ulong, ulong, struct reference *);
 char *fill_vma_cache(ulong);
 void clear_vma_cache(void);
 void dump_vma_cache(ulong);
+int generic_is_page_ptr(ulong, physaddr_t *);
 int is_page_ptr(ulong, physaddr_t *);
 void dump_vm_table(int);
 int read_string(ulong, char *, int);
@@ -5126,6 +5133,7 @@ int vaddr_type(ulong, struct task_context *);
 char *format_stack_entry(struct bt_info *bt, char *, ulong, ulong);
 int in_user_stack(ulong, ulong);
 int dump_inode_page(ulong);
+ulong valid_section_nr(ulong);
 
 
 /*
