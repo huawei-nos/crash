@@ -118,7 +118,8 @@ static void x86_64_init_hyper(int);
 static ulong x86_64_get_stackbase_hyper(ulong);
 static ulong x86_64_get_stacktop_hyper(ulong);
 static int x86_64_framesize_cache_resize(void);
-static int x86_64_framesize_cache_func(int, ulong, int *, int);
+static int x86_64_do_not_cache_framesize(struct syment *, ulong);
+static int x86_64_framesize_cache_func(int, ulong, int *, int, struct syment *);
 static ulong x86_64_get_framepointer(struct bt_info *, ulong);
 int search_for_eframe_target_caller(struct bt_info *, ulong, int *);
 static int x86_64_get_framesize(struct bt_info *, ulong, ulong);
@@ -202,7 +203,8 @@ x86_64_init(int when)
 			machdep->machspec->kernel_image_size = dtol(string, QUIET, NULL);
 			free(string);
 		}
-		if (SADUMP_DUMPFILE())
+		if (SADUMP_DUMPFILE() || QEMU_MEM_DUMP_NO_VMCOREINFO() ||
+		    VMSS_DUMPFILE())
 			/* Need for calculation of kaslr_offset and phys_base */
 			machdep->kvtop = x86_64_kvtop;
 		break;
@@ -2220,7 +2222,8 @@ x86_64_kvtop(struct task_context *tc, ulong kvaddr, physaddr_t *paddr, int verbo
 	ulong pte;
 	physaddr_t physpage;
 
-	if (SADUMP_DUMPFILE() && !(machdep->flags & KSYMS_START)) {
+	if ((SADUMP_DUMPFILE() || QEMU_MEM_DUMP_NO_VMCOREINFO() || VMSS_DUMPFILE())
+	    && !(machdep->flags & KSYMS_START)) {
 		/*
 		 * In the case of sadump, to calculate kaslr_offset and
 		 * phys_base, kvtop is called during symtab_init(). In this
@@ -3273,6 +3276,8 @@ x86_64_low_budget_back_trace_cmd(struct bt_info *bt_in)
 			diskdump_display_regs(bt->tc->processor, ofp);
 		else if (SADUMP_DUMPFILE())
 			sadump_display_regs(bt->tc->processor, ofp);
+		else if (VMSS_DUMPFILE())
+			vmware_vmss_display_regs(bt->tc->processor, ofp);
 		return;
 	}
 
@@ -3295,13 +3300,16 @@ x86_64_low_budget_back_trace_cmd(struct bt_info *bt_in)
 			diskdump_display_regs(bt->tc->processor, ofp);
 		else if (SADUMP_DUMPFILE())
 			sadump_display_regs(bt->tc->processor, ofp);
+		else if (VMSS_DUMPFILE())
+			vmware_vmss_display_regs(bt->tc->processor, ofp);
 		else if (pc->flags2 & QEMU_MEM_DUMP_ELF)
 			display_regs_from_elf_notes(bt->tc->processor, ofp);
 		return;
 	} else if ((bt->flags & BT_KERNEL_SPACE) &&
 		   (KVMDUMP_DUMPFILE() ||
 		    (ELF_NOTES_VALID() && DISKDUMP_DUMPFILE()) ||
-		    SADUMP_DUMPFILE() || (pc->flags2 & QEMU_MEM_DUMP_ELF))) {
+		    SADUMP_DUMPFILE() || (pc->flags2 & QEMU_MEM_DUMP_ELF) ||
+		    VMSS_DUMPFILE())) {
 		fprintf(ofp, "    [exception RIP: ");
 		if ((sp = value_search(bt->instptr, &offset))) {
 			fprintf(ofp, "%s", sp->name);
@@ -3317,6 +3325,8 @@ x86_64_low_budget_back_trace_cmd(struct bt_info *bt_in)
 			diskdump_display_regs(bt->tc->processor, ofp);
 		else if (SADUMP_DUMPFILE())
 			sadump_display_regs(bt->tc->processor, ofp);
+		else if (VMSS_DUMPFILE())
+			vmware_vmss_display_regs(bt->tc->processor, ofp);
 		else if (pc->flags2 & QEMU_MEM_DUMP_ELF)
 			display_regs_from_elf_notes(bt->tc->processor, ofp);
 
@@ -4941,7 +4951,8 @@ skip_stage:
 	if (halt_rip && halt_rsp) {
         	*rip = halt_rip;
 		*rsp = halt_rsp;
-		if (KVMDUMP_DUMPFILE() || SADUMP_DUMPFILE())
+		if (KVMDUMP_DUMPFILE() || SADUMP_DUMPFILE() ||
+		    (VMSS_DUMPFILE() && vmware_vmss_valid_regs(bt)))
 			bt_in->flags &= ~(ulonglong)BT_DUMPFILE_SEARCH;
 		return;
 	}
@@ -4986,7 +4997,8 @@ skip_stage:
 
         machdep->get_stack_frame(bt, rip, rsp);
 
-	if (KVMDUMP_DUMPFILE() || SADUMP_DUMPFILE())
+	if (KVMDUMP_DUMPFILE() || SADUMP_DUMPFILE() ||
+	    (VMSS_DUMPFILE() && vmware_vmss_valid_regs(bt)))
 		bt_in->flags &= ~(ulonglong)BT_DUMPFILE_SEARCH;
 }
 
@@ -6631,6 +6643,34 @@ x86_64_calc_phys_base(void)
 	 *  Get relocation value from whatever dumpfile format is being used.
 	 */
 
+	if (QEMU_MEM_DUMP_NO_VMCOREINFO()) {
+		if ((KDUMP_DUMPFILE() && kdump_phys_base(&phys_base)) ||
+		    (DISKDUMP_DUMPFILE() && diskdump_phys_base(&phys_base)))
+			machdep->machspec->phys_base = phys_base;
+
+		if (!x86_64_virt_phys_base())
+			error(WARNING,
+				"cannot determine physical base address:"
+				" defaulting to %lx\n\n",
+				machdep->machspec->phys_base);
+		return;
+	}
+
+	if (VMSS_DUMPFILE()) {
+		if (vmware_vmss_phys_base(&phys_base)) {
+			machdep->machspec->phys_base = phys_base;
+			if (!x86_64_virt_phys_base())
+				error(WARNING,
+				    "cannot determine physical base address:"
+				    " defaulting to %lx\n\n",
+					machdep->machspec->phys_base);
+			if (CRASHDEBUG(1))
+				fprintf(fp, "compressed kdump: phys_base: %lx\n",
+				    phys_base);
+		}
+		return;
+	}
+
 	if (DISKDUMP_DUMPFILE()) {
 		if (diskdump_phys_base(&phys_base)) {
 			machdep->machspec->phys_base = phys_base;
@@ -7804,8 +7844,90 @@ x86_64_framesize_cache_resize(void)
 	return TRUE;
 }
 
+ulong *x86_64_framesize_no_cache = NULL;
+static int framesize_no_cache_entries = 0;
+#define FRAMESIZE_NO_CACHE_INCR (10)
+
 static int
-x86_64_framesize_cache_func(int cmd, ulong textaddr, int *framesize, int exception)
+x86_64_do_not_cache_framesize(struct syment *sp, ulong textaddr)
+{
+	int c, instr, arg;
+	char buf[BUFSIZE];
+	char *arglist[MAXARGS];
+	ulong *new_fnc;
+
+	if (x86_64_framesize_no_cache[framesize_no_cache_entries-1]) {
+		if ((new_fnc = realloc(x86_64_framesize_no_cache,
+		    (framesize_no_cache_entries+FRAMESIZE_NO_CACHE_INCR) *
+		    sizeof(ulong))) == NULL) {
+			error(INFO, "cannot realloc x86_64_framesize_no_cache space!\n");
+			return FALSE;
+		}
+		x86_64_framesize_no_cache = new_fnc;
+		for (c = framesize_no_cache_entries; 
+		     c < framesize_no_cache_entries + FRAMESIZE_NO_CACHE_INCR; c++) 
+			x86_64_framesize_no_cache[c] = 0;
+		framesize_no_cache_entries += FRAMESIZE_NO_CACHE_INCR; 
+	}
+
+	for (c = 0; c < framesize_no_cache_entries; c++)
+		if (x86_64_framesize_no_cache[c] == sp->value)
+			return TRUE;
+
+	if (!accessible(sp->value))
+		return FALSE;
+
+	sprintf(buf, "disassemble 0x%lx,0x%lx", sp->value, textaddr);
+
+	open_tmpfile2();
+
+	if (!gdb_pass_through(buf, pc->tmpfile2, GNU_RETURN_ON_ERROR)) {
+		close_tmpfile2();
+		return FALSE;
+	}
+
+	rewind(pc->tmpfile2);
+	instr = arg = -1;
+	while (fgets(buf, BUFSIZE, pc->tmpfile2)) {
+		if (STRNEQ(buf, "Dump of assembler code"))
+			continue;
+		else if (STRNEQ(buf, "End of assembler dump."))
+			break;
+		else if ((c = parse_line(buf, arglist)) < 3)
+			continue;
+
+		if (instr == -1) {
+			if (LASTCHAR(arglist[0]) == ':') {
+                                instr = 1;
+                                arg = 2;
+                        } else {
+                                instr = 2;
+                                arg = 3;
+                        }
+		}
+
+		if (STREQ(arglist[instr], "and") && 
+		    STREQ(arglist[arg], "$0xfffffffffffffff0,%rsp")) {
+			close_tmpfile2();
+			for (c = 0; c < framesize_no_cache_entries; c++) {
+				if (x86_64_framesize_no_cache[c] == 0) {
+					x86_64_framesize_no_cache[c] = sp->value;
+					break;
+				}
+			}
+			return TRUE;
+		}
+
+		if (STREQ(arglist[instr], "callq"))
+			break;
+	}
+	close_tmpfile2();
+
+	return FALSE;
+}
+
+static int
+x86_64_framesize_cache_func(int cmd, ulong textaddr, int *framesize, int exception, struct syment *sp)
 {
 	int i, n;
 	struct framesize_cache *fc;
@@ -7817,6 +7939,10 @@ x86_64_framesize_cache_func(int cmd, ulong textaddr, int *framesize, int excepti
 		    sizeof(struct framesize_cache))) == NULL)
 			error(FATAL, 
 			    "cannot calloc x86_64_framesize_cache space!\n");
+		framesize_no_cache_entries = FRAMESIZE_NO_CACHE_INCR;
+		if ((x86_64_framesize_no_cache = calloc(framesize_no_cache_entries,
+		    sizeof(ulong))) == NULL)
+			error(FATAL, "cannot calloc x86_64_framesize_no_cache space!\n");
 	}
 
 	switch (cmd) 
@@ -7834,6 +7960,8 @@ x86_64_framesize_cache_func(int cmd, ulong textaddr, int *framesize, int excepti
 		return FALSE;
 
 	case FRAMESIZE_ENTER:
+		if (sp && x86_64_do_not_cache_framesize(sp, textaddr))
+			return *framesize;
 retry:
 		fc = &x86_64_framesize_cache[0];
 		for (i = 0; i < framesize_cache_entries; i++, fc++) {
@@ -7862,21 +7990,36 @@ retry:
 		return *framesize;
 
 	case FRAMESIZE_DUMP:
+		fprintf(fp, "framesize_cache_entries:\n");
 		fc = &x86_64_framesize_cache[0];
 		for (i = 0; i < framesize_cache_entries; i++, fc++) {
 			if (fc->textaddr == 0) {
 				if (i < (framesize_cache_entries-1)) {
-					fprintf(fp, "[%d-%d]: (unused)\n",
+					fprintf(fp, "  [%d-%d]: (unused)\n",
 						i, framesize_cache_entries-1);
 				}
 				break;
 			}
 
-			fprintf(fp, "[%3d]: %lx %3d %s (%s)\n", i,
+			fprintf(fp, "  [%3d]: %lx %3d %s (%s)\n", i,
 				fc->textaddr, fc->framesize,
 				fc->exception ? "EX" : "CF",
 				value_to_symstr(fc->textaddr, buf, 0));
 		}
+
+		fprintf(fp, "\nframesize_no_cache_entries:\n");
+		for (i = 0; i < framesize_no_cache_entries; i++) {
+			if (x86_64_framesize_no_cache[i])
+				fprintf(fp, "  [%3d]: %lx (%s)\n", 
+					i, x86_64_framesize_no_cache[i],
+					value_to_symstr(x86_64_framesize_no_cache[i], buf, 0));
+			else {
+				fprintf(fp, "  [%d-%d]: (unused)\n", 
+					i, framesize_no_cache_entries-1);
+				break;
+			}
+		}
+
 		break;
 	}
 
@@ -8005,7 +8148,7 @@ x86_64_get_framesize(struct bt_info *bt, ulong textaddr, ulong rsp)
 
 	if (!(bt->flags & BT_FRAMESIZE_DEBUG) &&
 	    x86_64_framesize_cache_func(FRAMESIZE_QUERY, textaddr, &framesize,
-		exception)) {
+		exception, NULL)) {
 		if (framesize == -1)
 			bt->flags |= BT_FRAMESIZE_DISABLE;
 		return framesize; 
@@ -8042,7 +8185,7 @@ x86_64_get_framesize(struct bt_info *bt, ulong textaddr, ulong rsp)
 		else 
 			framesize = 8;
 		return (x86_64_framesize_cache_func(FRAMESIZE_ENTER, textaddr, 
-                	&framesize, exception));
+                	&framesize, exception, NULL));
 	}
 
 	if ((machdep->flags & FRAMEPOINTER) && 
@@ -8060,7 +8203,7 @@ x86_64_get_framesize(struct bt_info *bt, ulong textaddr, ulong rsp)
 		if (framepointer) {
 			framesize = framepointer - rsp;
 			return (x86_64_framesize_cache_func(FRAMESIZE_ENTER, 
-				textaddr, &framesize, 0));
+				textaddr, &framesize, 0, sp));
 		}
 	}
 
@@ -8078,7 +8221,7 @@ x86_64_get_framesize(struct bt_info *bt, ulong textaddr, ulong rsp)
 		if ((korc->type == ORC_TYPE_CALL) && (korc->sp_reg == ORC_REG_SP)) {
 			framesize = (korc->sp_offset - 8);
 			return (x86_64_framesize_cache_func(FRAMESIZE_ENTER, textaddr, 
-				&framesize, exception));
+				&framesize, exception, NULL));
 		}
 	}
 
@@ -8199,7 +8342,7 @@ x86_64_get_framesize(struct bt_info *bt, ulong textaddr, ulong rsp)
 		textaddr = textaddr_save;
 
 	return (x86_64_framesize_cache_func(FRAMESIZE_ENTER, textaddr, 
-		&framesize, exception));
+		&framesize, exception, NULL));
 }
 
 static void 
@@ -8213,18 +8356,20 @@ x86_64_framesize_debug(struct bt_info *bt)
 	switch (bt->hp->esp) 
 	{
 	case 1: /* "dump" */
-		x86_64_framesize_cache_func(FRAMESIZE_DUMP, 0, NULL, 0);
+		x86_64_framesize_cache_func(FRAMESIZE_DUMP, 0, NULL, 0, NULL);
 		break;
 
 	case 0:
 		if (bt->hp->eip) {  /* clear one entry */
 			framesize = -1;
 			x86_64_framesize_cache_func(FRAMESIZE_ENTER, bt->hp->eip, 
-				&framesize, exception);
+				&framesize, exception, NULL);
 		} else { /* clear all entries */
 			BZERO(&x86_64_framesize_cache[0], 
 			    sizeof(struct framesize_cache)*framesize_cache_entries);
-			fprintf(fp, "framesize cache cleared\n");
+			BZERO(&x86_64_framesize_no_cache[0], 
+			    sizeof(ulong)*framesize_no_cache_entries);
+			fprintf(fp, "framesize caches cleared\n");
 		}
 		break;
 
@@ -8239,16 +8384,20 @@ x86_64_framesize_debug(struct bt_info *bt)
 		machdep->flags |= FRAMEPOINTER;
 		BZERO(&x86_64_framesize_cache[0], 
 			sizeof(struct framesize_cache)*framesize_cache_entries);
+		BZERO(&x86_64_framesize_no_cache[0], 
+			sizeof(ulong)*framesize_no_cache_entries);
 		fprintf(fp, 
-			"framesize cache cleared and FRAMEPOINTER turned ON\n");
+			"framesize caches cleared and FRAMEPOINTER turned ON\n");
 		break;
 
 	case -4:
 		machdep->flags &= ~FRAMEPOINTER;
 		BZERO(&x86_64_framesize_cache[0], 
 			sizeof(struct framesize_cache)*framesize_cache_entries);
+		BZERO(&x86_64_framesize_no_cache[0], 
+			sizeof(ulong)*framesize_no_cache_entries);
 		fprintf(fp,
-			"framesize cache cleared and FRAMEPOINTER turned OFF\n");
+			"framesize caches cleared and FRAMEPOINTER turned OFF\n");
 		break;
 
 	case -5:
@@ -8263,7 +8412,7 @@ x86_64_framesize_debug(struct bt_info *bt)
 			framesize = bt->hp->esp;
 			if (bt->hp->eip)
 				x86_64_framesize_cache_func(FRAMESIZE_ENTER, bt->hp->eip, 
-					&framesize, exception);
+					&framesize, exception, NULL);
 		} else
 			error(INFO, "x86_64_framesize_debug: ignoring command\n");
 		break;
@@ -8290,7 +8439,7 @@ __schedule_frame_adjust(ulong rsp_in, struct bt_info *bt)
 			rsp_in, bt->stackbase, bt->stacktop, bt->tc->processor);
 
 	if (x86_64_framesize_cache_func(FRAMESIZE_QUERY, 
-	    machdep->machspec->thread_return, &framesize, 0)) {
+	    machdep->machspec->thread_return, &framesize, 0, NULL)) {
 		rsp = rsp_in + framesize;
 		i = (rsp - bt->stackbase)/sizeof(ulong);
 		up = (ulong *)(&bt->stackbuf[i*sizeof(ulong)]);
@@ -8318,7 +8467,7 @@ __schedule_frame_adjust(ulong rsp_in, struct bt_info *bt)
 			bt->instptr = *up;
 			x86_64_framesize_cache_func(FRAMESIZE_ENTER, 
 			    machdep->machspec->thread_return,
-			    &framesize, 0);
+			    &framesize, 0, NULL);
 			bt->instptr = *up;
 			found = TRUE;
 			break;
