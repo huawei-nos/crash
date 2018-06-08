@@ -2017,10 +2017,20 @@ struct offset_table {                    /* stash of commonly-used offsets */
 	long bpf_prog_bpf_func;
 	long bpf_prog_len;
 	long bpf_prog_insnsi;
+	long bpf_prog_pages;
 	long bpf_map_map_type;
 	long bpf_map_map_flags;
+	long bpf_map_pages;
+	long bpf_map_key_size;
+	long bpf_map_value_size;
+	long bpf_map_max_entries;
+	long bpf_map_user;
+	long bpf_map_name;
 	long bpf_prog_aux_used_map_cnt;
 	long bpf_prog_aux_used_maps;
+	long bpf_prog_aux_load_time;
+	long bpf_prog_aux_user;
+	long user_struct_uid;
 };
 
 struct size_table {         /* stash of commonly-used sizes */
@@ -3380,6 +3390,9 @@ struct arm64_stackframe {
 
 #define VSYSCALL_START             0xffffffffff600000
 #define VSYSCALL_END               0xffffffffff601000
+
+#define CPU_ENTRY_AREA_START       0xfffffe0000000000
+#define CPU_ENTRY_AREA_END         0xfffffe7fffffffff
 
 #define PTOV(X)               ((unsigned long)(X)+(machdep->kvbase))
 #define VTOP(X)               x86_64_VTOP((ulong)(X))
@@ -5819,6 +5832,8 @@ struct machine_specific {
 	ulong kpti_entry_stack;
 	ulong kpti_entry_stack_size;
 	ulong ptrs_per_pgd;
+	ulong cpu_entry_area_start;
+	ulong cpu_entry_area_end;
 };
 
 #define KSYMS_START    (0x1)

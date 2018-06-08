@@ -1437,8 +1437,8 @@ display_memory(ulonglong addr, long count, ulong flag, int memtype, void *opt)
 	char hexchars[MAX_HEXCHARS_PER_LINE+1];
 	char ch;
 	int linelen;
-	char buf[BUFSIZE];
-	char slab[BUFSIZE/2];
+	char buf[BUFSIZE*2];
+	char slab[BUFSIZE];
 	int ascii_start;
 	ulong error_handle;
 	char *hex_64_fmt = BITS32() ? "%.*llx " : "%.*lx ";
@@ -1951,8 +1951,8 @@ cmd_wr(void)
 char *
 format_stack_entry(struct bt_info *bt, char *retbuf, ulong value, ulong limit)
 {
-	char buf[BUFSIZE];
-	char slab[BUFSIZE/2];
+	char buf[BUFSIZE*2];
+	char slab[BUFSIZE];
 
 	if (BITS32()) {
 		if ((bt->flags & BT_FULL_SYM_SLAB) && accessible(value)) {
@@ -5110,7 +5110,13 @@ PG_reserved_flag_init(void)
 		return;
 	}
 
-	vaddr = kt->stext ? kt->stext : symbol_value("sys_read");
+	vaddr = kt->stext;
+	if (!vaddr) {
+		if (kernel_symbol_exists("sys_read"))
+			vaddr = symbol_value("sys_read");
+		else if (kernel_symbol_exists("__x64_sys_read"))
+			vaddr = symbol_value("__x64_sys_read");
+	}
 
 	if (!phys_to_page((physaddr_t)VTOP(vaddr), &pageptr))
 		return;
@@ -13781,7 +13787,7 @@ show_hits:
                 for (i = vhits = 0; i < VMA_CACHE; i++)
                         vhits += vt->cached_vma_hits[i];
 
-                fprintf(stderr, "%s       vma hit rate: %2ld%% (%ld of %ld)\n",
+                fprintf(fp, "%s       vma hit rate: %2ld%% (%ld of %ld)\n",
 			verbose ? "" : "  ",
                         (vhits * 100)/vt->vma_cache_fills,
                         vhits, vt->vma_cache_fills);
