@@ -164,7 +164,8 @@ kernel_init()
                        	error(FATAL, "cannot malloc m2p page.");
 	}
 
-	if (PVOPS() && readmem(symbol_value("pv_init_ops"), KVADDR, &pv_init_ops,
+	if (PVOPS() && symbol_exists("pv_init_ops") &&
+	    readmem(symbol_value("pv_init_ops"), KVADDR, &pv_init_ops,
 	    sizeof(void *), "pv_init_ops", RETURN_ON_ERROR) &&
 	    (p1 = value_symbol(pv_init_ops)) && 
 	    STREQ(p1, "xen_patch")) {
@@ -882,7 +883,7 @@ cpu_maps_init(void)
 {
         int i, c, m, cpu, len;
         char *buf;
-        ulong *maskptr, addr;
+        ulong *maskptr, addr, error_handle;
 	struct mapinfo {
 		ulong cpu_flag;
 		char *name;
@@ -902,8 +903,9 @@ cpu_maps_init(void)
 		if (!(addr = cpu_map_addr(mapinfo[m].name)))
 			continue;
 
+		error_handle = pc->flags & DEVMEM ? RETURN_ON_ERROR|QUIET : RETURN_ON_ERROR;
 		if (!readmem(addr, KVADDR, buf, len,
-		    mapinfo[m].name, RETURN_ON_ERROR)) {
+		    mapinfo[m].name, error_handle)) {
 			error(WARNING, "cannot read cpu_%s_map\n",
 			      mapinfo[m].name);
 			continue;
@@ -6325,7 +6327,7 @@ get_irq_desc_addr(int irq)
 	int c;
 	ulong cnt, addr, ptr;
 	long len;
-	struct radix_tree_pair *rtp;
+	struct list_pair *rtp;
 
 	addr = 0;
 	rtp = NULL;
@@ -6353,8 +6355,8 @@ get_irq_desc_addr(int irq)
 
 		cnt = do_radix_tree(symbol_value("irq_desc_tree"),
 				RADIX_TREE_COUNT, NULL);
-		len = sizeof(struct radix_tree_pair) * (cnt+1);
-		rtp = (struct radix_tree_pair *)GETBUF(len);
+		len = sizeof(struct list_pair) * (cnt+1);
+		rtp = (struct list_pair *)GETBUF(len);
 		rtp[0].index = cnt;
 		cnt = do_radix_tree(symbol_value("irq_desc_tree"),
 				RADIX_TREE_GATHER, rtp);
@@ -10322,6 +10324,14 @@ paravirt_init(void)
 			error(INFO, "pv_init_ops exists: ARCH_PVOPS\n");
 		kt->flags |= ARCH_PVOPS;
 	}
+	/*
+	 * pv_init_ops moved to first entry in pv_ops as of 4.20-rc1
+	 */
+	if (kernel_symbol_exists("pv_ops")) {
+		if (CRASHDEBUG(1))
+			error(INFO, "pv_ops exists: ARCH_PVOPS\n");
+		kt->flags |= ARCH_PVOPS;
+	}
 }
 
 /*
@@ -10358,7 +10368,7 @@ get_xtime(struct timespec *date)
 static void 
 hypervisor_init(void)
 {
-	ulong x86_hyper, name, pv_init_ops;
+	ulong x86_hyper, name, pv_init_ops, pv_ops;
 	char buf[BUFSIZE], *p1;
 
 	kt->hypervisor = "(undetermined)";
@@ -10382,9 +10392,16 @@ hypervisor_init(void)
 		kt->hypervisor = "Xen";
 	else if (KVMDUMP_DUMPFILE())
 		kt->hypervisor = "KVM";
-	else if (PVOPS() && readmem(symbol_value("pv_init_ops"), KVADDR, 
+	else if (PVOPS() && symbol_exists("pv_init_ops") &&
+	    readmem(symbol_value("pv_init_ops"), KVADDR, 
 	    &pv_init_ops, sizeof(void *), "pv_init_ops", RETURN_ON_ERROR) &&
 	    (p1 = value_symbol(pv_init_ops)) &&
+	    STREQ(p1, "native_patch"))
+		kt->hypervisor = "bare hardware";
+	else if (PVOPS() && symbol_exists("pv_ops") &&
+	    readmem(symbol_value("pv_ops"), KVADDR, 
+	    &pv_ops, sizeof(void *), "pv_ops", RETURN_ON_ERROR) &&
+	    (p1 = value_symbol(pv_ops)) &&
 	    STREQ(p1, "native_patch"))
 		kt->hypervisor = "bare hardware";
 

@@ -72,20 +72,18 @@ struct ipcs_table {
 	int use_shm_f_op;
 	int seq_multiplier;
 	int rt_cnt;
-	struct radix_tree_pair *rtp;
+	struct list_pair *rtp;
 };
 
 /*
  * function declaration
  */
 
-static void ipcs_init(void);
 static int dump_shared_memory(int, ulong, int, ulong);
 static int dump_semaphore_arrays(int, ulong, int, ulong);
 static int dump_message_queues(int, ulong, int, ulong);
 static int ipc_search_idr(ulong, int, ulong, int (*)(ulong, int, ulong, int, int), int);
 static int ipc_search_array(ulong, int, ulong, int (*)(ulong, int, ulong, int, int), int);
-static ulong idr_find(ulong, int);
 static int dump_shm_info(ulong, int, ulong, int, int);
 static int dump_sem_info(ulong, int, ulong, int, int);
 static int dump_msg_info(ulong, int, ulong, int, int);
@@ -101,7 +99,7 @@ static void gather_radix_tree_entries(ulong);
  */
 static struct ipcs_table ipcs_table = { 0 };
 
-static void
+void
 ipcs_init(void)
 {
 	if (ipcs_table.init_flags & IPCS_INIT) {
@@ -119,6 +117,7 @@ ipcs_init(void)
 	MEMBER_OFFSET_INIT(idr_layer_layer, "idr_layer", "layer");
 	MEMBER_OFFSET_INIT(idr_layer_ary, "idr_layer", "ary");
 	MEMBER_OFFSET_INIT(idr_top, "idr", "top");
+	MEMBER_OFFSET_INIT(idr_cur, "idr", "cur");
 	MEMBER_OFFSET_INIT(ipc_id_ary_p, "ipc_id_ary", "p");
 	MEMBER_OFFSET_INIT(ipc_ids_entries, "ipc_ids", "entries");
 	MEMBER_OFFSET_INIT(ipc_ids_max_id, "ipc_ids", "max_id");
@@ -188,7 +187,10 @@ ipcs_init(void)
 		ipcs_table.shm_f_op_huge_addr = -1;
 	}
 
-	if (BITS32())
+	if (VALID_MEMBER(idr_layer_ary) && 
+	    get_array_length("idr_layer.ary", NULL, 0) > 64)
+		ipcs_table.idr_bits = 8;
+	else if (BITS32())
 		ipcs_table.idr_bits = 5;
 	else if (BITS64())
 		ipcs_table.idr_bits = 6;
@@ -635,7 +637,7 @@ ipc_search_idr(ulong ipc_ids_p, int specified, ulong specified_value, int (*fn)(
 /*
  * search every idr_layer
  */
-static ulong
+ulong
 idr_find(ulong idp, int id)
 {
 	ulong idr_layer_p;
@@ -1110,8 +1112,8 @@ gather_radix_tree_entries(ulong ipcs_idr_p)
 	ipcs_table.rt_cnt = do_radix_tree(ipcs_idr_p, RADIX_TREE_COUNT, NULL);
 
 	if (ipcs_table.rt_cnt) {
-		len = sizeof(struct radix_tree_pair) * (ipcs_table.rt_cnt+1);
-		ipcs_table.rtp = (struct radix_tree_pair *)GETBUF(len);
+		len = sizeof(struct list_pair) * (ipcs_table.rt_cnt+1);
+		ipcs_table.rtp = (struct list_pair *)GETBUF(len);
 		ipcs_table.rtp[0].index = ipcs_table.rt_cnt;
 		ipcs_table.rt_cnt = do_radix_tree(ipcs_idr_p, RADIX_TREE_GATHER, ipcs_table.rtp);
 	} else
