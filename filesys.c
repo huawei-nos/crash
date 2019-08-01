@@ -1,8 +1,8 @@
 /* filesys.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002-2018 David Anderson
- * Copyright (C) 2002-2018 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002-2019 David Anderson
+ * Copyright (C) 2002-2019 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -37,7 +37,6 @@ static int mount_point(char *);
 static int open_file_reference(struct reference *);
 static void memory_source_init(void);
 static int get_pathname_component(ulong, ulong, int, char *, char *);
-static ulong *get_mount_list(int *, struct task_context *);
 char *inode_type(char *, char *);
 static void match_proc_version(void);
 static void get_live_memory_source(void);
@@ -1600,7 +1599,7 @@ show_mounts(ulong one_vfsmount, int flags, struct task_context *namespace_contex
 /*
  *  Allocate and fill a list of the currently-mounted vfsmount pointers.
  */
-static ulong *
+ulong *
 get_mount_list(int *cntptr, struct task_context *namespace_context)
 {
 	struct list_data list_data, *ld;
@@ -1698,10 +1697,10 @@ display_dentry_info(ulong dentry)
                 superblock = ULONG(inode_buf + OFFSET(inode_i_sb));
 	} else {
 		inode_buf = NULL;
-		superblock = 0;
+		superblock = ULONG(dentry_buf + OFFSET(dentry_d_sb));
 	}
 
-	if (!inode || !superblock)
+	if (!superblock)
 		goto nopath;
 
         if (VALID_MEMBER(file_f_vfsmnt)) {
@@ -2015,6 +2014,7 @@ vfs_init(void)
 	MEMBER_OFFSET_INIT(dentry_d_covers, "dentry", "d_covers");
 	MEMBER_OFFSET_INIT(dentry_d_name, "dentry", "d_name");
 	MEMBER_OFFSET_INIT(dentry_d_iname, "dentry", "d_iname");
+	MEMBER_OFFSET_INIT(dentry_d_sb, "dentry", "d_sb");
 	MEMBER_OFFSET_INIT(inode_i_mode, "inode", "i_mode");
 	MEMBER_OFFSET_INIT(inode_i_op, "inode", "i_op");
 	MEMBER_OFFSET_INIT(inode_i_sb, "inode", "i_sb");
@@ -2217,7 +2217,9 @@ dump_inode_page_cache_info(ulong inode)
 
 	xarray = root_rnode = count = 0;
 	if (MEMBER_EXISTS("address_space", "i_pages") &&
-	    STREQ(MEMBER_TYPE_NAME("address_space", "i_pages"), "xarray"))
+	    (STREQ(MEMBER_TYPE_NAME("address_space", "i_pages"), "xarray") ||
+	    (STREQ(MEMBER_TYPE_NAME("address_space", "i_pages"), "radix_tree_root") &&
+	     MEMBER_EXISTS("radix_tree_root", "xa_head"))))
 		xarray = i_mapping + OFFSET(address_space_page_tree);
 	else 
 		root_rnode = i_mapping + OFFSET(address_space_page_tree);
@@ -4193,7 +4195,7 @@ static void do_xarray_dump_cb(ulong node, ulong slot, const char *path,
 	/* Caller defined operation */
 	if (!cb(slot)) {
 		if (slot & XARRAY_TAG_MASK) {
-			if (CRASHDEBUG(0))
+			if (CRASHDEBUG(1))
 				error(INFO, "entry has XARRAY_TAG_MASK bits set: %lx\n", slot); 
 			return;
 		}

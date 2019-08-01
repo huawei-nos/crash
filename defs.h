@@ -1,8 +1,8 @@
 /* defs.h - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002-2018 David Anderson
- * Copyright (C) 2002-2018 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002-2019 David Anderson
+ * Copyright (C) 2002-2019 Red Hat, Inc. All rights reserved.
  * Copyright (C) 2002 Silicon Graphics, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -147,6 +147,8 @@
 #ifdef SPARC64
 #define NR_CPUS  (4096)
 #endif
+
+#define NR_DEVICE_DUMPS (64)
 
 /* Some architectures require memory accesses to be aligned.  */
 #if defined(SPARC64)
@@ -551,6 +553,8 @@ struct program_context {
 	ulong scope;			/* optional text context address */
 	ulong nr_hash_queues;		/* hash queue head count */
 	char *(*read_vmcoreinfo)(const char *);
+	FILE *error_fp;			/* error() message direction */
+	char *error_path;		/* stderr path information */
 };
 
 #define READMEM  pc->readmem
@@ -638,7 +642,6 @@ struct new_utsname {
 #define ARCH_PVOPS          (0x10000000)
 #define PRE_KERNEL_INIT     (0x20000000)
 #define ARCH_PVOPS_XEN      (0x40000000)
-#define IRQ_DESC_TREE       (0x80000000)
 
 #define GCC_VERSION_DEPRECATED (GCC_3_2|GCC_3_2_3|GCC_2_96|GCC_3_3_2|GCC_3_3_3)
 
@@ -649,6 +652,8 @@ struct new_utsname {
 #define GET_TIMESTAMP               (0x8ULL)
 #define TVEC_BASES_V3              (0x10ULL)
 #define TIMER_BASES                (0x20ULL)
+#define IRQ_DESC_TREE_RADIX        (0x40ULL)
+#define IRQ_DESC_TREE_XARRAY       (0x80ULL)
 
 #define XEN()       (kt->flags & ARCH_XEN)
 #define OPENVZ()    (kt->flags & ARCH_OPENVZ)
@@ -2063,6 +2068,11 @@ struct offset_table {                    /* stash of commonly-used offsets */
 	long xarray_xa_head;
 	long xa_node_slots;
 	long xa_node_shift;
+	long hd_struct_dkstats;
+	long disk_stats_in_flight;
+	long cpu_context_save_r7;
+	long dentry_d_sb;
+	long device_private_knode_class;
 };
 
 struct size_table {         /* stash of commonly-used sizes */
@@ -3073,7 +3083,7 @@ typedef signed int s32;
 #define PMD_SHIFT_L3_64K     (29)
 #define PMD_SIZE_L3_64K      (1UL << PMD_SHIFT_L3_64K)
 #define PMD_MASK_L3_64K      (~(PMD_SIZE_L3_64K-1))
-#define PGDIR_OFFSET_L3_64K(X) (((ulong)(X)) & ((PTRS_PER_PGD_L3_64K * 8) - 1))
+#define PGDIR_OFFSET_L3_64K(X) (((ulong)(X)) & ((machdep->ptrs_per_pgd * 8) - 1))
 
 /*
  * 2-levels / 64K pages
@@ -3135,9 +3145,17 @@ typedef signed int s32;
  */
 #define ARM64_VA_START       ((0xffffffffffffffffUL) \
 					<< machdep->machspec->VA_BITS)
+#define _VA_START(va)        ((0xffffffffffffffffUL) - \
+                             ((1UL) << ((va) - 1)) + 1)
+#define TEXT_OFFSET_MASK     (~((MEGABYTES(2UL))-1))
+
 #define ARM64_PAGE_OFFSET    ((0xffffffffffffffffUL) \
 					<< (machdep->machspec->VA_BITS - 1))
+#define ARM64_PAGE_OFFSET_ACTUAL ((0xffffffffffffffffUL) \
+					- ((1UL) << machdep->machspec->VA_BITS_ACTUAL) + 1)
+
 #define ARM64_USERSPACE_TOP  ((1UL) << machdep->machspec->VA_BITS)
+#define ARM64_USERSPACE_TOP_ACTUAL  ((1UL) << machdep->machspec->VA_BITS_ACTUAL)
 
 /* only used for v4.6 or later */
 #define ARM64_MODULES_VSIZE     MEGABYTES(128)
@@ -3160,6 +3178,7 @@ typedef signed int s32;
 #define _SECTION_SIZE_BITS      30
 #define _MAX_PHYSMEM_BITS       40
 #define _MAX_PHYSMEM_BITS_3_17  48
+#define _MAX_PHYSMEM_BITS_52    52
 
 typedef unsigned long long __u64;
 typedef unsigned long long u64;
@@ -3239,6 +3258,9 @@ struct machine_specific {
 	ulong kern_eframe_offset;
 	ulong machine_kexec_start;
 	ulong machine_kexec_end;
+	ulong VA_BITS_ACTUAL;
+	ulong CONFIG_ARM64_VA_BITS;
+	ulong VA_START;
 };
 
 struct arm64_stackframe {
@@ -3426,6 +3448,9 @@ struct arm64_stackframe {
 #define MODULES_END_5LEVEL         0xffffffffff5fffff
 #define VMEMMAP_VADDR_5LEVEL       0xffd4000000000000
 #define VMEMMAP_END_5LEVEL         0xffd5ffffffffffff
+
+#define PAGE_OFFSET_4LEVEL_4_20    0xffff888000000000
+#define PAGE_OFFSET_5LEVEL_4_20    0xff11000000000000
 
 #define VSYSCALL_START             0xffffffffff600000
 #define VSYSCALL_END               0xffffffffff601000
@@ -4092,6 +4117,7 @@ struct efi_memory_desc_t {
 #define _MAX_PHYSMEM_BITS	44
 #define _MAX_PHYSMEM_BITS_3_7   46
 #define _MAX_PHYSMEM_BITS_4_19  47
+#define _MAX_PHYSMEM_BITS_4_20  51
 
 #endif /* PPC64 */
 
@@ -4363,6 +4389,7 @@ struct machine_specific {
 #define INT_HEX      (0x40)
 #define LONGLONG_HEX (0x80)
 #define ZERO_FILL   (0x100)
+#define SLONG_DEC   (0x200)
 
 #define INIT_TIME (1)
 #define RUN_TIME  (2)
@@ -4588,6 +4615,7 @@ struct gnu_request {
 	char *member_main_type_tag_name;
 	char *member_target_type_name;
 	char *member_target_type_tag_name;
+	char *type_tag_name;
 };
 
 /*
@@ -4898,6 +4926,7 @@ int clean_exit(int);
 int untrusted_file(FILE *, char *);
 char *readmem_function_name(void);
 char *writemem_function_name(void);
+char *no_vmcoreinfo(const char *);
 
 /*
  *  cmdline.c
@@ -4928,6 +4957,7 @@ void exec_args_input_file(struct command_table_entry *, struct args_input_file *
 /*
  *  tools.c
  */
+FILE *set_error(char *);
 int __error(int, char *, ...);
 #define error __error               /* avoid conflict with gdb error() */
 int console(char *, ...);
@@ -5004,6 +5034,7 @@ struct xarray_ops {
 int do_xarray_traverse(ulong ptr, int is_root, struct xarray_ops *ops);
 int do_rdtree(struct tree_data *);
 int do_rbtree(struct tree_data *);
+int do_xatree(struct tree_data *);
 int retrieve_list(ulong *, int);
 long power(long, int);
 long long ll_power(long long, long long);
@@ -5188,6 +5219,7 @@ void parse_for_member_extended(struct datatype_member *, ulong);
 void add_to_downsized(char *);
 int is_downsized(char *);
 int is_string(char *, char *);
+struct syment *symbol_complete_match(const char *, struct syment *);
 
 /*  
  *  memory.c 
@@ -5250,6 +5282,7 @@ char *format_stack_entry(struct bt_info *bt, char *, ulong, ulong);
 int in_user_stack(ulong, ulong);
 int dump_inode_page(ulong);
 ulong valid_section_nr(ulong);
+void display_memory_from_file_offset(ulonglong, long, void *);
 
 
 /*
@@ -5269,6 +5302,7 @@ void set_tmpfile2(FILE *);
 void close_tmpfile2(void);
 void open_files_dump(ulong, int, struct reference *);
 void get_pathname(ulong, char *, int, int, ulong);
+ulong *get_mount_list(int *, struct task_context *);
 char *vfsmount_devname(ulong, char *, int);
 ulong file_to_dentry(ulong);
 ulong file_to_vfsmnt(ulong);
@@ -5659,6 +5693,8 @@ enum {
  */
 void dev_init(void);
 void dump_dev_table(void);
+void devdump_extract(void *, ulonglong, char *, FILE *);
+void devdump_info(void *, ulonglong, FILE *);
 
 /*
  *  ipcs.c
@@ -5913,6 +5949,7 @@ struct machine_specific {
 	ulong ptrs_per_pgd;
 	ulong cpu_entry_area_start;
 	ulong cpu_entry_area_end;
+	ulong page_offset_force;
 };
 
 #define KSYMS_START    (0x1)
@@ -6359,6 +6396,7 @@ void map_cpus_to_prstatus(void);
 int kdump_phys_base(ulong *);
 int kdump_set_phys_base(ulong);
 int arm_kdump_phys_base(ulong *);
+int arm_kdump_phys_end(ulong *);
 int is_proc_kcore(char *, ulong);
 int proc_kcore_init(FILE *, int);
 int read_proc_kcore(int, void *, int, ulong, physaddr_t);
@@ -6370,7 +6408,10 @@ void display_regs_from_elf_notes(int, FILE *);
 void display_ELF_note(int, int, void *, FILE *);
 void *netdump_get_prstatus_percpu(int);
 int kdump_kaslr_check(void);
+void display_vmcoredd_note(void *ptr, FILE *ofp);
 QEMUCPUState *kdump_get_qemucpustate(int);
+void kdump_device_dump_info(FILE *);
+void kdump_device_dump_extract(int, char *, FILE *);
 #define PRSTATUS_NOTE (1)
 #define QEMU_NOTE     (2)
 
@@ -6405,6 +6446,7 @@ int diskdump_phys_base(unsigned long *);
 int diskdump_set_phys_base(unsigned long);
 ulong *diskdump_flags;
 int is_partial_diskdump(void);
+int get_dump_level(void);
 int dumpfile_is_split(void);
 void show_split_dumpfiles(void);
 void x86_process_elf_notes(void *, unsigned long);
@@ -6416,6 +6458,8 @@ void process_elf64_notes(void *, ulong);
 void dump_registers_for_compressed_kdump(void);
 int diskdump_kaslr_check(void);
 QEMUCPUState *diskdump_get_qemucpustate(int);
+void diskdump_device_dump_info(FILE *);
+void diskdump_device_dump_extract(int, char *, FILE *);
 
 /*
  * makedumpfile.c

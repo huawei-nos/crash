@@ -1,8 +1,8 @@
 /* tools.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002-2018 David Anderson
- * Copyright (C) 2002-2018 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002-2019 David Anderson
+ * Copyright (C) 2002-2019 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -38,6 +38,44 @@ static void print_value(struct req_entry *, unsigned int, ulong, unsigned int);
 static struct req_entry *fill_member_offsets(char *);
 static void dump_struct_members_fast(struct req_entry *, int, ulong);
 
+FILE *
+set_error(char *target)
+{
+	FILE *tmp_fp = NULL;
+	char *tmp_str = NULL;
+
+	if (STREQ(target, pc->error_path))
+		return pc->error_fp;
+
+	tmp_str = malloc(strlen(target) + 1);
+	if (tmp_str == NULL)
+		return NULL;
+	strcpy(tmp_str, target);
+
+	if (STREQ(target, "default"))
+		tmp_fp = stdout;
+	else if (STREQ(target, "redirect"))
+		tmp_fp = fp;
+	else {
+		tmp_fp = fopen(target, "a");
+		if (tmp_fp == NULL) {
+			error(INFO, "invalid path: %s\n", target);
+			return NULL;
+		}
+	}
+
+	if (pc->error_fp != NULL && pc->error_fp != stdout && pc->error_fp != fp)
+		fclose(pc->error_fp);
+	if (pc->error_path)
+		free(pc->error_path);
+
+	pc->error_fp = tmp_fp;
+	pc->error_path = tmp_str;
+
+	return pc->error_fp;
+}
+
+
 /*
  *  General purpose error reporting routine.  Type INFO prints the message
  *  and returns.  Type FATAL aborts the command in progress, and longjmps
@@ -58,6 +96,9 @@ __error(int type, char *fmt, ...)
         void *retaddr[NUMBER_STACKFRAMES] = { 0 };
 	va_list ap;
 
+	if (STREQ(pc->error_path, "redirect"))
+		pc->error_fp = fp;
+
 	if (CRASHDEBUG(1) || (pc->flags & DROP_CORE)) {
 		SAVE_RETURN_ADDRESS(retaddr);
 		console("error() trace: %lx => %lx => %lx => %lx\n",
@@ -69,7 +110,7 @@ __error(int type, char *fmt, ...)
         va_end(ap);
 
 	if (!fmt && FATAL_ERROR(type)) {
-		fprintf(stdout, "\n");
+		fprintf(pc->error_fp, "\n");
 		clean_exit(1);
 	}
 
@@ -85,7 +126,8 @@ __error(int type, char *fmt, ...)
 	else
 		spacebuf = NULL;
 
-	if (pc->stdpipe) {
+	if (pc->stdpipe && 
+	    (STREQ(pc->error_path, "default") || STREQ(pc->error_path, "redirect"))) {
 		fprintf(pc->stdpipe, "%s%s%s %s%s", 
 			new_line ? "\n" : "", 
 			type == CONT ? spacebuf : pc->curcmd, 
@@ -95,21 +137,22 @@ __error(int type, char *fmt, ...)
 			buf);
 		fflush(pc->stdpipe);
 	} else { 
-		fprintf(stdout, "%s%s%s %s%s", 
+		fprintf(pc->error_fp, "%s%s%s %s%s",
 			new_line || end_of_line ? "\n" : "",
 			type == WARNING ? "WARNING" : 
 			type == NOTE ? "NOTE" : 
 			type == CONT ? spacebuf : pc->curcmd,
 			type == CONT ? " " : ":",
 			buf, end_of_line ? "\n" : "");
-		fflush(stdout);
+		fflush(pc->error_fp);
 	}
 
-        if ((fp != stdout) && (fp != pc->stdpipe) && (fp != pc->tmpfile)) {
-                fprintf(fp, "%s%s%s %s", new_line ? "\n" : "",
-			type == WARNING ? "WARNING" : 
-			type == NOTE ? "NOTE" : 
-			type == CONT ? spacebuf : pc->curcmd, 
+	if ((STREQ(pc->error_path, "default")) &&
+	    (fp != stdout) && (fp != pc->stdpipe) && (fp != pc->tmpfile)) {
+		fprintf(fp, "%s%s%s %s", new_line ? "\n" : "",
+			type == WARNING ? "WARNING" :
+			type == NOTE ? "NOTE" :
+			type == CONT ? spacebuf : pc->curcmd,
 			type == CONT ? " " : ":",
 			buf);
 		fflush(fp);
@@ -168,7 +211,8 @@ parse_line(char *str, char *argv[])
                 return(0);
 
         i = j = k = 0;
-        string = expression = FALSE;
+        string = FALSE;
+	expression = 0;
 
 	/*
 	 * Special handling for when the first character is a '"'.
@@ -220,11 +264,37 @@ next:
 	                i++;
 	            }
 
-                    if (!string && str[i] == '(') {     
-                        expression = TRUE;
-                    }
-	
-	
+		    /*
+		     *  Make an expression encompassed by a set of parentheses 
+		     *  a single argument.  Also account for embedded sets.
+		     */
+		    if (!string && str[i] == '(') {     
+			argv[j++] = &str[i];
+			expression = 1;
+			while (expression > 0) {
+				i++;
+				switch (str[i])
+				{
+				case '(':
+					expression++;
+					break;
+				case ')':
+					expression--;
+					break;
+				case NULLCHAR:
+				case '\n':
+					expression = -1;
+					break;
+				default:
+					break;
+				}
+			}
+			if (expression == 0) {
+				i++;
+				continue;
+			}
+		    }
+
 	            if (str[i] != NULLCHAR && str[i] != '\n') {
 	                argv[j++] = &str[i];
 	                if (string) {
@@ -234,11 +304,6 @@ next:
 	                        if (str[i] == '"')
 	                                str[i] = ' ';
 	                }
-                        if (expression) {
-                                expression = FALSE;
-                                while (str[i] != ')' && str[i] != NULLCHAR)
-                                        i++;
-                        }
 	                break;
 	            }
 	                        /* else fall through */
@@ -1628,10 +1693,13 @@ mkstring(char *s, int size, ulong flags, const char *opt)
 	int left;
 	int right;
 
-	switch (flags & (LONG_DEC|LONG_HEX|INT_HEX|INT_DEC|LONGLONG_HEX|ZERO_FILL)) 
+	switch (flags & (LONG_DEC|SLONG_DEC|LONG_HEX|INT_HEX|INT_DEC|LONGLONG_HEX|ZERO_FILL))
 	{
 	case LONG_DEC:
 		sprintf(s, "%lu", (ulong)opt);
+		break;
+	case SLONG_DEC:
+		sprintf(s, "%ld", (ulong)opt);
 		break;
 	case LONG_HEX:
 		sprintf(s, "%lx", (ulong)opt);
@@ -2461,6 +2529,19 @@ cmd_set(void)
 			}
 			return;
 
+                } else if (STREQ(args[optind], "error")) {
+                        if (args[optind+1]) {
+                                optind++;
+                                if (!set_error(args[optind]))
+                                        return;
+                        }
+
+                        if (runtime) {
+                                fprintf(fp, "error: %s\n",
+                                        pc->error_path);
+                        }
+                        return;
+
 		} else if (XEN_HYPER_MODE()) {
 			error(FATAL, "invalid argument for the Xen hypervisor\n");
 		} else if (pc->flags & MINIMAL_MODE) {
@@ -2568,6 +2649,7 @@ show_options(void)
 		fprintf(fp, "(not set)\n");
 	fprintf(fp, "       offline: %s\n", pc->flags2 & OFFLINE_HIDE ? "hide" : "show");
 	fprintf(fp, "       redzone: %s\n", pc->flags2 & REDZONE ? "on" : "off");
+	fprintf(fp, "         error: %s\n", pc->error_path);
 }
 
 
@@ -4066,7 +4148,7 @@ do_list_no_hash(struct list_data *ld)
 		if (!brent_loop_detect) {
 			if (brent_x == brent_y) {
 				brent_loop_detect = 1;
-				error(INFO, "loop detected, loop length: %lx\n", brent_lambda);
+				error(INFO, "loop detected, loop length: %ld\n", brent_lambda);
 				/* reset x and y to start; advance y loop length */
 				brent_mu = 0;
 				brent_x = brent_y = ld->start;
@@ -4193,6 +4275,7 @@ dump_struct_members(struct list_data *ld, int idx, ulong next)
 
 #define RADIXTREE_REQUEST (0x1)
 #define RBTREE_REQUEST    (0x2)
+#define XARRAY_REQUEST    (0x4)
 
 void
 cmd_tree()
@@ -4214,15 +4297,20 @@ cmd_tree()
 		switch (c)
 		{
 		case 't':
-			if (type_flag & (RADIXTREE_REQUEST|RBTREE_REQUEST)) {
+			if (type_flag & (RADIXTREE_REQUEST|RBTREE_REQUEST|XARRAY_REQUEST)) {
 				error(INFO, "multiple tree types may not be entered\n");
 				cmd_usage(pc->curcmd, SYNOPSIS);
 			}
 
 			if (STRNEQ(optarg, "ra"))
-				type_flag = RADIXTREE_REQUEST;
+				if (MEMBER_EXISTS("radix_tree_root", "xa_head"))
+					type_flag = XARRAY_REQUEST;
+				else
+					type_flag = RADIXTREE_REQUEST;
 			else if (STRNEQ(optarg, "rb"))
 				type_flag = RBTREE_REQUEST;
+			else if (STRNEQ(optarg, "x"))
+				type_flag = XARRAY_REQUEST;
 			else {
 				error(INFO, "invalid tree type: %s\n", optarg);
 				cmd_usage(pc->curcmd, SYNOPSIS);
@@ -4307,11 +4395,13 @@ cmd_tree()
 	if (argerrs)
 		cmd_usage(pc->curcmd, SYNOPSIS);
 
-	if ((type_flag & RADIXTREE_REQUEST) && (td->flags & TREE_LINEAR_ORDER))
-		error(FATAL, "-l option is not applicable to radix trees\n");
+	if ((type_flag & (XARRAY_REQUEST|RADIXTREE_REQUEST)) && (td->flags & TREE_LINEAR_ORDER))
+		error(FATAL, "-l option is not applicable to %s\n", 
+			type_flag & RADIXTREE_REQUEST ? "radix trees" : "Xarrays");
 
-	if ((type_flag & RADIXTREE_REQUEST) && (td->flags & TREE_NODE_OFFSET_ENTERED))
-		error(FATAL, "-o option is not applicable to radix trees\n");
+	if ((type_flag & (XARRAY_REQUEST|RADIXTREE_REQUEST)) && (td->flags & TREE_NODE_OFFSET_ENTERED))
+		error(FATAL, "-o option is not applicable to %s\n",
+			type_flag & RADIXTREE_REQUEST ? "radix trees" : "Xarrays");
 
 	if ((td->flags & TREE_ROOT_OFFSET_ENTERED) && 
 	    (td->flags & TREE_NODE_POINTER))
@@ -4386,8 +4476,15 @@ next_arg:
 			fprintf(fp, "%sTREE_STRUCT_RADIX_16",
 				others++ ? "|" : "");
 		fprintf(fp, ")\n");
-		fprintf(fp, "              type: %s\n",
-			type_flag & RADIXTREE_REQUEST ? "radix" : "red-black");
+		fprintf(fp, "              type: ");
+			if (type_flag & RADIXTREE_REQUEST)
+				fprintf(fp, "radix\n");
+			else if (type_flag & XARRAY_REQUEST)
+				fprintf(fp, "xarray\n");
+			else
+				fprintf(fp, "red-black%s", 
+					type_flag & RBTREE_REQUEST ? 
+					"\n" : " (default)\n");
 		fprintf(fp, "      node pointer: %s\n",
 			td->flags & TREE_NODE_POINTER ? "yes" : "no");
 		fprintf(fp, "             start: %lx\n", td->start);
@@ -4402,6 +4499,8 @@ next_arg:
 	hq_open();
 	if (type_flag & RADIXTREE_REQUEST)
 		do_rdtree(td);
+	else if (type_flag & XARRAY_REQUEST)
+		do_xatree(td);
 	else
 		do_rbtree(td);
 	hq_close();
@@ -4702,7 +4801,7 @@ static void do_rdtree_entry(ulong node, ulong slot, const char *path,
 		fprintf(fp, "%lx\n", slot);
 
 	if (td->flags & TREE_POSITION_DISPLAY) {
-		fprintf(fp, "  position: %s/%ld\n",
+		fprintf(fp, "  index: %ld  position: %s/%ld\n", index,
 			path, index & RADIX_TREE_MAP_MASK);
 	}
 
@@ -4746,6 +4845,79 @@ int do_rdtree(struct tree_data *td)
 		ops.radix = 0;
 
 	do_radix_tree_traverse(td->start, is_root, &ops);
+
+	return 0;
+}
+
+
+static void do_xarray_entry(ulong node, ulong slot, const char *path,
+			    ulong index, void *private)
+{
+	struct tree_data *td = private;
+	static struct req_entry **e = NULL;
+	uint print_radix;
+	int i;
+
+	if (!td->count && td->structname_args) {
+		/*
+		 * Retrieve all members' info only once (count == 0)
+		 * After last iteration all memory will be freed up
+		 */
+		e = (struct req_entry **)GETBUF(sizeof(*e) * td->structname_args);
+		for (i = 0; i < td->structname_args; i++)
+			e[i] = fill_member_offsets(td->structname[i]);
+	}
+
+	td->count++;
+
+	if (td->flags & VERBOSE)
+		fprintf(fp, "%lx\n", slot);
+
+	if (td->flags & TREE_POSITION_DISPLAY) {
+		fprintf(fp, "  index: %ld  position: %s/%ld\n", index,
+			path, index & XA_CHUNK_MASK);
+	}
+
+	if (td->structname) {
+		if (td->flags & TREE_STRUCT_RADIX_10)
+			print_radix = 10;
+		else if (td->flags & TREE_STRUCT_RADIX_16)
+			print_radix = 16;
+		else
+			print_radix = 0;
+
+		for (i = 0; i < td->structname_args; i++) {
+			switch (count_chars(td->structname[i], '.')) {
+			case 0:
+				dump_struct(td->structname[i], slot, print_radix);
+				break;
+			default:
+				if (td->flags & TREE_PARSE_MEMBER)
+					dump_struct_members_for_tree(td, i, slot);
+				else if (td->flags & TREE_READ_MEMBER)
+					dump_struct_members_fast(e[i], print_radix, slot);
+				break;
+			}
+		}
+	}
+}
+
+int do_xatree(struct tree_data *td)
+{
+	struct xarray_ops ops = {
+		.entry		= do_xarray_entry,
+		.private	= td,
+	};
+	int is_root = !(td->flags & TREE_NODE_POINTER);
+
+	if (td->flags & TREE_STRUCT_RADIX_10)
+		ops.radix = 10;
+	else if (td->flags & TREE_STRUCT_RADIX_16)
+		ops.radix = 16;
+	else
+		ops.radix = 0;
+
+	do_xarray_traverse(td->start, is_root, &ops);
 
 	return 0;
 }

@@ -1,7 +1,7 @@
 /* x86_64.c -- core analysis suite
  *
- * Copyright (C) 2004-2018 David Anderson
- * Copyright (C) 2004-2018 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2004-2019 David Anderson
+ * Copyright (C) 2004-2019 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -381,6 +381,23 @@ x86_64_init(int when)
 		break;
 
 	case POST_GDB:
+		if (!(machdep->flags & RANDOMIZED) &&
+		    ((THIS_KERNEL_VERSION >= LINUX(4,20,0)) || 
+		    ((THIS_KERNEL_VERSION >= LINUX(4,14,84)) && 
+		     (THIS_KERNEL_VERSION < LINUX(4,15,0))))) {
+			machdep->machspec->page_offset = machdep->flags & VM_5LEVEL ?
+				PAGE_OFFSET_5LEVEL_4_20 : PAGE_OFFSET_4LEVEL_4_20;
+			machdep->kvbase = machdep->machspec->page_offset; 
+			machdep->identity_map_base = machdep->machspec->page_offset; 
+		}
+		/* 
+		 * --machdep page_offset forced override 
+		 */
+		if (machdep->machspec->page_offset_force) {
+			machdep->machspec->page_offset = machdep->machspec->page_offset_force;
+			machdep->kvbase = machdep->machspec->page_offset; 
+			machdep->identity_map_base = machdep->machspec->page_offset; 
+		}
 		if (THIS_KERNEL_VERSION >= LINUX(2,6,26) &&
 		    THIS_KERNEL_VERSION < LINUX(2,6,31)) {
 			machdep->machspec->modules_vaddr = MODULES_VADDR_2_6_26;
@@ -887,6 +904,11 @@ x86_64_dump_machdep_table(ulong arg)
 	fprintf(fp, "           machspec: %016lx\n", (ulong)machdep->machspec);
 	fprintf(fp, "            userspace_top: %016lx\n", (ulong)ms->userspace_top);
 	fprintf(fp, "              page_offset: %016lx\n", (ulong)ms->page_offset);
+	fprintf(fp, "        page_offset_force: ");
+	if (ms->page_offset_force)
+		fprintf(fp, "%016lx\n", (ulong)ms->page_offset_force);
+	else
+		fprintf(fp, "(unused)\n");
 	fprintf(fp, "       vmalloc_start_addr: %016lx\n", (ulong)ms->vmalloc_start_addr);
 	fprintf(fp, "              vmalloc_end: %016lx\n", (ulong)ms->vmalloc_end);
 	fprintf(fp, "            modules_vaddr: %016lx\n", (ulong)ms->modules_vaddr);
@@ -1241,10 +1263,12 @@ x86_64_per_cpu_init(void)
 {
 	int i, cpus, cpunumber;
 	struct machine_specific *ms;
-	struct syment *irq_sp, *curr_sp, *cpu_sp;
+	struct syment *irq_sp, *curr_sp, *cpu_sp, *hardirq_stack_ptr_sp;
+	ulong hardirq_stack_ptr;
 
 	ms = machdep->machspec;
 
+	hardirq_stack_ptr_sp = per_cpu_symbol_search("hardirq_stack_ptr");
 	irq_sp = per_cpu_symbol_search("per_cpu__irq_stack_union");
 	cpu_sp = per_cpu_symbol_search("per_cpu__cpu_number");
 	curr_sp = per_cpu_symbol_search("per_cpu__current_task");
@@ -1272,8 +1296,15 @@ x86_64_per_cpu_init(void)
 		return;
 	}
 
-	if (!cpu_sp || !irq_sp) 
+	if (!cpu_sp || (!irq_sp && !hardirq_stack_ptr_sp))
 		return;
+
+	if (MEMBER_EXISTS("irq_stack_union", "irq_stack"))
+		ms->stkinfo.isize = MEMBER_SIZE("irq_stack_union", "irq_stack");
+	else if (MEMBER_EXISTS("irq_stack", "stack"))
+		ms->stkinfo.isize = MEMBER_SIZE("irq_stack", "stack");
+	else if (!ms->stkinfo.isize)
+		ms->stkinfo.isize = 16384;
 
 	for (i = cpus = 0; i < NR_CPUS; i++) {
 		if (!readmem(cpu_sp->value + kt->__per_cpu_offset[i],
@@ -1285,12 +1316,15 @@ x86_64_per_cpu_init(void)
 			break;
 		cpus++;
 
-		ms->stkinfo.ibase[i] = irq_sp->value + kt->__per_cpu_offset[i];
+		if (hardirq_stack_ptr_sp) {
+			if (!readmem(hardirq_stack_ptr_sp->value + kt->__per_cpu_offset[i],
+		    	    KVADDR, &hardirq_stack_ptr, sizeof(void *),
+		    	    "hardirq_stack_ptr (per_cpu)", QUIET|RETURN_ON_ERROR))
+				continue;
+			ms->stkinfo.ibase[i] = hardirq_stack_ptr - ms->stkinfo.isize;
+		} else if (irq_sp)
+			ms->stkinfo.ibase[i] = irq_sp->value + kt->__per_cpu_offset[i];
 	}
-
-	if ((ms->stkinfo.isize = 
-	    MEMBER_SIZE("irq_stack_union", "irq_stack")) <= 0)
-		ms->stkinfo.isize = 16384;
 
 	if (CRASHDEBUG(2))
 		fprintf(fp, "x86_64_per_cpu_init: "
@@ -1325,7 +1359,7 @@ x86_64_per_cpu_init(void)
 static void 
 x86_64_ist_init(void)
 {
-	int c, i, cnt, cpus, esize;
+	int c, i, cpus, esize;
 	ulong vaddr, offset;
 	ulong init_tss;
 	struct machine_specific *ms;
@@ -1405,7 +1439,31 @@ x86_64_ist_init(void)
 		return;
 	}
 
-	if (ms->stkinfo.ebase[0][0] && ms->stkinfo.ebase[0][1])
+	if (MEMBER_EXISTS("exception_stacks", "NMI_stack")) {
+                for (i = 0; i < MAX_EXCEPTION_STACKS; i++) {
+			if (STREQ(ms->stkinfo.exception_stacks[i], "DEBUG"))
+				ms->stkinfo.esize[i] = MEMBER_SIZE("exception_stacks", "DB_stack");
+			else if (STREQ(ms->stkinfo.exception_stacks[i], "NMI"))
+				ms->stkinfo.esize[i] = MEMBER_SIZE("exception_stacks", "NMI_stack");
+			else if (STREQ(ms->stkinfo.exception_stacks[i], "DOUBLEFAULT"))
+				ms->stkinfo.esize[i] = MEMBER_SIZE("exception_stacks", "DF_stack");
+			else if (STREQ(ms->stkinfo.exception_stacks[i], "MCE"))
+				ms->stkinfo.esize[i] = MEMBER_SIZE("exception_stacks", "MCE_stack");
+		}
+		/*
+	 	 *  Adjust the top-of-stack addresses down to the base stack address.
+		 */
+		for (c = 0; c < kt->cpus; c++) {
+			for (i = 0; i < MAX_EXCEPTION_STACKS; i++) {
+				if (ms->stkinfo.ebase[c][i] == 0) 
+					continue;
+				ms->stkinfo.ebase[c][i] -= ms->stkinfo.esize[i];
+			}
+		}
+
+		return;
+
+	} else if (ms->stkinfo.ebase[0][0] && ms->stkinfo.ebase[0][1])
 		esize = ms->stkinfo.ebase[0][1] - ms->stkinfo.ebase[0][0];
 	else
 		esize = 4096;
@@ -1415,10 +1473,9 @@ x86_64_ist_init(void)
 	 *  to the base stack address.
 	 */
         for (c = 0; c < kt->cpus; c++) {
-                for (i = cnt = 0; i < MAX_EXCEPTION_STACKS; i++) {
+                for (i = 0; i < MAX_EXCEPTION_STACKS; i++) {
                         if (ms->stkinfo.ebase[c][i] == 0) 
                                 break;
-			cnt++;
 			if ((THIS_KERNEL_VERSION >= LINUX(2,6,18)) &&
 			    STREQ(ms->stkinfo.exception_stacks[i], "DEBUG"))
 				ms->stkinfo.esize[i] = esize*2;
@@ -5942,13 +5999,12 @@ parse_cmdline_args(void)
 				}
 	                        p = arglist[i] + strlen("phys_base=");
 	                        if (strlen(p)) {
-					if (megabytes) {
-	                                	value = dtol(p, RETURN_ON_ERROR|QUIET,
-	                                        	&errflag);
-					} else
-	                                	value = htol(p, RETURN_ON_ERROR|QUIET,
-	                                        	&errflag);
-	                                if (!errflag) {
+					if (hexadecimal(p, 0) && !decimal(p, 0) &&
+					    !STRNEQ(p, "0x") && !STRNEQ(p, "0X"))
+						string_insert("0x", p);
+					errno = 0;
+					value = strtoull(p, NULL, 0);
+	                                if (!errno) {
 						if (megabytes)
 							value = MEGABYTES(value);
 	                                        machdep->machspec->phys_base = value;
@@ -6019,6 +6075,18 @@ parse_cmdline_args(void)
 	                                        error(NOTE,
 	                                            "setting max_physmem_bits to: %ld\n\n",
 	                                                machdep->max_physmem_bits);
+						continue;
+					}
+				}
+			} else if (STRNEQ(arglist[i], "page_offset=")) {
+				p = arglist[i] + strlen("page_offset=");
+				if (strlen(p)) {
+					value = htol(p, RETURN_ON_ERROR|QUIET, &errflag);
+
+					if (!errflag) {
+						machdep->machspec->page_offset_force = value;
+						error(NOTE, "setting PAGE_OFFSET to: 0x%lx\n\n",
+							machdep->machspec->page_offset_force);
 						continue;
 					}
 				}
@@ -6937,7 +7005,7 @@ x86_64_virt_phys_base(void)
 	    QUIET|RETURN_ON_ERROR) && STRNEQ(buf, "Linux version"))
 		return TRUE;
 
-	for (phys = (ulong)(-MEGABYTES(16)); phys != MEGABYTES(16+1); 
+	for (phys = (ulong)(-MEGABYTES(32)); phys != 0xfffff00000; 
 	     phys += MEGABYTES(1)) {
 		if (readmem(linux_banner_phys + phys, PHYSADDR, buf,
 		    strlen("Linux version"), "linux_banner search", 
@@ -7903,7 +7971,11 @@ x86_64_init_hyper(int when)
 	case POST_GDB:
 		XEN_HYPER_STRUCT_SIZE_INIT(cpuinfo_x86, "cpuinfo_x86");
 		XEN_HYPER_STRUCT_SIZE_INIT(tss_struct, "tss_struct");
-		XEN_HYPER_ASSIGN_OFFSET(tss_struct_rsp0) = MEMBER_OFFSET("tss_struct", "__blh") + sizeof(short unsigned int);
+		if (MEMBER_EXISTS("tss_struct", "__blh")) {
+			XEN_HYPER_ASSIGN_OFFSET(tss_struct_rsp0) = MEMBER_OFFSET("tss_struct", "__blh") + sizeof(short unsigned int);
+		} else {
+			XEN_HYPER_ASSIGN_OFFSET(tss_struct_rsp0) = MEMBER_OFFSET("tss_struct", "rsp0");
+		}
 		XEN_HYPER_MEMBER_OFFSET_INIT(tss_struct_ist, "tss_struct", "ist");
 		if (symbol_exists("cpu_data")) {
 			xht->cpu_data_address = symbol_value("cpu_data");

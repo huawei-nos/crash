@@ -26,6 +26,7 @@
 #include "defs.h"
 #include "diskdump.h"
 #include "xen_dom0.h"
+#include "vmcore.h"
 
 #define BITMAP_SECT_LEN	4096
 
@@ -58,6 +59,8 @@ struct diskdump_data {
 	void	**nt_qemu_percpu;
 	void	**nt_qemucs_percpu;
 	uint	num_qemu_notes;
+	void	**nt_vmcoredd_array;
+	uint	num_vmcoredd_notes;
 
 	/* page cache */
 	struct page_cache_hdr {		/* header for each cached page */
@@ -77,7 +80,6 @@ struct diskdump_data {
 
 static struct diskdump_data diskdump_data = { 0 };
 static struct diskdump_data *dd = &diskdump_data;
-static int get_dump_level(void);
 
 ulong *diskdump_flags = &diskdump_data.flags;
 
@@ -279,6 +281,7 @@ process_elf32_notes(void *note_buf, unsigned long size_note)
 	Elf32_Nhdr *nt;
 	size_t index, len = 0;
 	int num = 0;
+	int vmcoredd_num = 0;
 	int qemu_num = 0;
 
 	for (index = 0; index < size_note; index += len) {
@@ -304,6 +307,12 @@ process_elf32_notes(void *note_buf, unsigned long size_note)
 			process_xen_note(nt->n_type, data, nt->n_descsz);
 		}
 
+		if (nt->n_type == NT_VMCOREDD &&
+		    vmcoredd_num < NR_DEVICE_DUMPS) {
+			dd->nt_vmcoredd_array[vmcoredd_num] = nt;
+			vmcoredd_num++;
+		}
+
 		len = roundup(len + nt->n_namesz, 4);
 		len = roundup(len + nt->n_descsz, 4);
 	}
@@ -317,6 +326,9 @@ process_elf32_notes(void *note_buf, unsigned long size_note)
 		pc->flags2 |= QEMU_MEM_DUMP_COMPRESSED;
 		dd->num_qemu_notes = qemu_num;
 	}
+	if (vmcoredd_num > 0)
+		dd->num_vmcoredd_notes = vmcoredd_num;
+
 	return;
 }
 
@@ -326,6 +338,7 @@ process_elf64_notes(void *note_buf, unsigned long size_note)
 	Elf64_Nhdr *nt;
 	size_t index, len = 0;
 	int num = 0;
+	int vmcoredd_num = 0;
 	int qemu_num = 0;
 
 	for (index = 0; index < size_note; index += len) {
@@ -357,6 +370,12 @@ process_elf64_notes(void *note_buf, unsigned long size_note)
 			process_xen_note(nt->n_type, data, nt->n_descsz);
 		}
 
+		if (nt->n_type == NT_VMCOREDD &&
+		    vmcoredd_num < NR_DEVICE_DUMPS) {
+			dd->nt_vmcoredd_array[vmcoredd_num] = nt;
+			vmcoredd_num++;
+		}
+
 		len = roundup(len + nt->n_namesz, 4);
 		len = roundup(len + nt->n_descsz, 4);
 	}
@@ -370,6 +389,9 @@ process_elf64_notes(void *note_buf, unsigned long size_note)
 		pc->flags2 |= QEMU_MEM_DUMP_COMPRESSED;
 		dd->num_qemu_notes = qemu_num;
 	}
+	if (vmcoredd_num > 0)
+		dd->num_vmcoredd_notes = vmcoredd_num;
+
 	return;
 }
 
@@ -778,6 +800,10 @@ restart:
 			error(FATAL, "qemu mem dump compressed: cannot malloc pointer"
 				" to QEMUCS notes\n");
 
+		if ((dd->nt_vmcoredd_array = malloc(NR_DEVICE_DUMPS * sizeof(void *))) == NULL)
+			error(FATAL, "compressed kdump: cannot malloc array for "
+				     "vmcore device dump notes\n");
+
 		if (FLAT_FORMAT()) {
 			if (!read_flattened_format(dd->dfd, offset, dd->notes_buf, size)) {
 				error(INFO, "compressed kdump: cannot read notes data"
@@ -875,6 +901,8 @@ err:
 		free(dd->nt_qemu_percpu);
 	if (dd->nt_qemucs_percpu)
 		free(dd->nt_qemucs_percpu);
+	if (dd->nt_vmcoredd_array)
+		free(dd->nt_vmcoredd_array);
 
 	dd->flags &= ~(DISKDUMP_LOCAL|KDUMP_CMPRS_LOCAL);
 	pc->flags2 &= ~ELF_NOTES;
@@ -1948,6 +1976,15 @@ __diskdump_memory_dump(FILE *fp)
 				dd->sub_header_kdump->size_note);
 			fprintf(fp, "           notes_buf: %lx\n",
 				(ulong)dd->notes_buf);
+			fprintf(fp, "  num_vmcoredd_notes: %d\n",
+				dd->num_vmcoredd_notes);
+			for (i = 0; i < dd->num_vmcoredd_notes; i++) {
+				fprintf(fp, "            notes[%d]: %lx %s\n",
+					i, (ulong)dd->nt_vmcoredd_array[i],
+					dd->nt_vmcoredd_array[i] ? "(NT_VMCOREDD)" : "");
+				display_vmcoredd_note(dd->nt_vmcoredd_array[i], fp);
+			}
+
 			fprintf(fp, "  num_prstatus_notes: %d\n",
 				dd->num_prstatus_notes);
 			for (i = 0; i < dd->num_prstatus_notes; i++) {
@@ -2076,7 +2113,7 @@ get_diskdump_switch_stack(ulong task)
  *  Version 1 and later compressed kdump dumpfiles contain the dump level
  *  in an additional field of the sub_header_kdump structure.
  */
-static int 
+int
 get_dump_level(void)
 {
 	int dump_level;
@@ -2500,3 +2537,50 @@ diskdump_get_qemucpustate(int cpu)
         return (QEMUCPUState *)dd->nt_qemucs_percpu[cpu];
 }
 #endif
+
+/*
+ * extract hardware specific device dumps from coredump.
+ */
+void
+diskdump_device_dump_extract(int index, char *outfile, FILE *ofp)
+{
+	ulonglong offset;
+
+	if (!dd->num_vmcoredd_notes)
+		error(FATAL, "no device dumps found in this dumpfile\n");
+	else if (index >= dd->num_vmcoredd_notes)
+		error(FATAL, "no device dump found at index: %d", index);
+
+	offset = dd->sub_header_kdump->offset_note +
+		 ((unsigned char *)dd->nt_vmcoredd_array[index] -
+		  dd->notes_buf);
+
+	devdump_extract(dd->nt_vmcoredd_array[index], offset, outfile, ofp);
+}
+
+/*
+ * list all hardware specific device dumps present in coredump.
+ */
+void
+diskdump_device_dump_info(FILE *ofp)
+{
+	ulonglong offset;
+	char buf[BUFSIZE];
+	ulong i;
+
+	if (!dd->num_vmcoredd_notes)
+		error(FATAL, "no device dumps found in this dumpfile\n");
+
+	fprintf(fp, "%s ", mkstring(buf, strlen("INDEX"), LJUST, "INDEX"));
+	fprintf(fp, " %s ", mkstring(buf, LONG_LONG_PRLEN, LJUST, "OFFSET"));
+	fprintf(fp, "  %s ", mkstring(buf, LONG_PRLEN, LJUST, "SIZE"));
+	fprintf(fp, "NAME\n");
+
+	for (i = 0; i < dd->num_vmcoredd_notes; i++) {
+		fprintf(fp, "%s  ", mkstring(buf, strlen("INDEX"), CENTER | INT_DEC, MKSTR(i)));
+		offset = dd->sub_header_kdump->offset_note +
+			 ((unsigned char *)dd->nt_vmcoredd_array[i] -
+			  dd->notes_buf);
+		devdump_info(dd->nt_vmcoredd_array[i], offset, ofp);
+	}
+}

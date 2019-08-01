@@ -1,8 +1,8 @@
 /* memory.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002-2018 David Anderson
- * Copyright (C) 2002-2018 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002-2019 David Anderson
+ * Copyright (C) 2002-2019 Red Hat, Inc. All rights reserved.
  * Copyright (C) 2002 Silicon Graphics, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -910,26 +910,40 @@ vm_init(void)
 	if (IS_VMALLOC_ADDR(vt->mem_map))
 		vt->flags |= V_MEM_MAP;
 	vt->total_pages = BTOP(VTOP(vt->high_memory));
-	switch (get_syment_array("totalram_pages", sp_array, 2)) 
-	{
-	case 1:
-		get_symbol_data("totalram_pages", sizeof(ulong), 
-			&vt->totalram_pages);
-		break;
-	case 2:
-		if (!(readmem(sp_array[0]->value, KVADDR, 
-		    &value1, sizeof(ulong), 
-		    "totalram_pages #1", RETURN_ON_ERROR)))
+
+	if (symbol_exists("_totalram_pages")) {
+		readmem(symbol_value("_totalram_pages") +
+			OFFSET(atomic_t_counter), KVADDR,
+			&vt->totalram_pages, sizeof(ulong),
+			"_totalram_pages", FAULT_ON_ERROR);
+	} else {
+		switch (get_syment_array("totalram_pages", sp_array, 2))
+		{
+		case 1:
+			get_symbol_data("totalram_pages", sizeof(ulong),
+				&vt->totalram_pages);
 			break;
-                if (!(readmem(sp_array[1]->value, KVADDR,
-                    &value2, sizeof(ulong), 
-		    "totalram_pages #2", RETURN_ON_ERROR)))
-                        break;
-		vt->totalram_pages = MAX(value1, value2);
-		break;
+		case 2:
+			if (!(readmem(sp_array[0]->value, KVADDR,
+			    &value1, sizeof(ulong),
+			    "totalram_pages #1", RETURN_ON_ERROR)))
+				break;
+			if (!(readmem(sp_array[1]->value, KVADDR,
+			    &value2, sizeof(ulong),
+			    "totalram_pages #2", RETURN_ON_ERROR)))
+				break;
+			vt->totalram_pages = MAX(value1, value2);
+			break;
+		}
 	}
 
-	if (symbol_exists("totalhigh_pages")) {
+	if (symbol_exists("_totalhigh_pages")) {
+		readmem(symbol_value("_totalhigh_pages") +
+			OFFSET(atomic_t_counter), KVADDR,
+			&vt->totalhigh_pages, sizeof(ulong),
+			"_totalhigh_pages", FAULT_ON_ERROR);
+		vt->total_pages += vt->totalhigh_pages;
+	} else if (symbol_exists("totalhigh_pages")) {
 	        switch (get_syment_array("totalhigh_pages", sp_array, 2))
 	        {
 	        case 1:
@@ -1095,6 +1109,9 @@ vm_init(void)
                                 "zone", "pages_high");
                         MEMBER_OFFSET_INIT(zone_watermark,
                                 "zone", "watermark");
+                        if (INVALID_MEMBER(zone_watermark))
+                                MEMBER_OFFSET_INIT(zone_watermark,
+                                        "zone", "_watermark");
                         MEMBER_OFFSET_INIT(zone_nr_active,
                                 "zone", "nr_active");
                         MEMBER_OFFSET_INIT(zone_nr_inactive,
@@ -1191,9 +1208,9 @@ vm_init(void)
 void
 cmd_rd(void)
 {
-	int c, memtype;
+	int c, memtype, reverse;
 	ulong flag;
-	long count;
+	long bcnt, adjust, count;
 	ulonglong addr, endaddr;
 	ulong offset;
 	struct syment *sp;
@@ -1207,10 +1224,16 @@ cmd_rd(void)
 	tmpfp = NULL;
 	outputfile = NULL;
 	count = -1;
+	adjust = bcnt = 0;
+	reverse = FALSE;
 
-        while ((c = getopt(argcnt, args, "axme:r:pfudDusSNo:81:3:6:")) != EOF) {
+        while ((c = getopt(argcnt, args, "Raxme:r:pfudDusSNo:81:3:6:")) != EOF) {
                 switch(c)
 		{
+		case 'R':
+			reverse = TRUE;
+			break;
+
 		case 'a':
 			flag &= ~DISPLAY_TYPES;
                         flag |= DISPLAY_ASCII;
@@ -1366,8 +1389,6 @@ cmd_rd(void)
 
 	if (count == -1) {
 		if (endaddr) {
-			long bcnt;
-
 			if (endaddr <= addr)
 				error(FATAL, "invalid ending address: %llx\n",
 					endaddr);
@@ -1411,6 +1432,34 @@ cmd_rd(void)
 	if (memtype == KVADDR) {
 		if (!COMMON_VADDR_SPACE() && !IS_KVADDR(addr))
 			memtype = UVADDR;
+	}
+
+	if (reverse) {
+		if (!count)
+			count = 1;
+
+		switch (flag & (DISPLAY_TYPES))
+		{
+		case DISPLAY_64:
+			bcnt = (count * 8);
+			adjust = bcnt - 8;
+			break;
+		case DISPLAY_32:
+			bcnt = (count * 4);
+			adjust = bcnt - 4;
+			break;
+		case DISPLAY_16:
+			bcnt = (count * 2);
+			adjust = bcnt - 2;
+			break;
+		case DISPLAY_8:
+		case DISPLAY_ASCII:
+		case DISPLAY_RAW:
+			bcnt = count;
+			adjust = bcnt - 1;
+			break;
+		}
+		addr = (count > 1) ? addr - adjust : addr;
 	}
 
 	display_memory(addr, count, flag, memtype, outputfile);
@@ -1774,6 +1823,16 @@ display_memory(ulonglong addr, long count, ulong flag, int memtype, void *opt)
 
 	if (lost != count )
 		fprintf(fp,"\n");
+}
+
+void
+display_memory_from_file_offset(ulonglong addr, long count, void *file)
+{
+	if (file)
+		display_memory(addr, count, DISPLAY_RAW, FILEADDR, file);
+	else
+		display_memory(addr, count, DISPLAY_64|ASCII_ENDLINE|HEXADECIMAL,
+			FILEADDR, file);
 }
 
 /*
@@ -6570,6 +6629,9 @@ dump_inode_page(ulong page)
 {
 	struct meminfo meminfo;
 
+	if (!is_page_ptr(page, NULL))
+		return 0;
+
 	BZERO(&meminfo, sizeof(struct meminfo));
 	meminfo.spec_addr = page;
 	meminfo.memtype = KVADDR;
@@ -8163,7 +8225,6 @@ dump_kmeminfo(void)
 	long nr_file_pages, nr_slab;
 	ulong swapper_space_nrpages;
 	ulong pct;
-	ulong value1, value2;
 	uint tmp;
 	struct meminfo meminfo;
 	struct gnu_request req;
@@ -8171,7 +8232,6 @@ dump_kmeminfo(void)
         ulong get_totalram;
         ulong get_buffers;
         ulong get_slabs;
-        struct syment *sp_array[2];
 	char buf[BUFSIZE];
 
 
@@ -8204,7 +8264,8 @@ dump_kmeminfo(void)
          *    Prior to 2.3.36, count all mem_map pages minus the reserved ones.
          *    From 2.3.36 onwards, use "totalram_pages" if set.
 	 */
-	if (symbol_exists("totalram_pages")) {  
+	if (symbol_exists("totalram_pages") ||
+	    symbol_exists("_totalram_pages")) {
 		totalram_pages = vt->totalram_pages ? 
 			vt->totalram_pages : get_totalram; 
 	} else 
@@ -8356,25 +8417,9 @@ dump_kmeminfo(void)
 	fprintf(fp, "%13s  %7ld  %11s  %3ld%% of TOTAL MEM\n",
 		"SLAB", get_slabs, pages_to_size(get_slabs, buf), pct);
 
-        if (symbol_exists("totalhigh_pages")) {
-	        switch (get_syment_array("totalhigh_pages", sp_array, 2))
-	        {
-	        case 1:
-	                get_symbol_data("totalhigh_pages", sizeof(ulong),
-	                        &totalhigh_pages);
-	                break;
-	        case 2:
-	                if (!(readmem(sp_array[0]->value, KVADDR,
-	                    &value1, sizeof(ulong),
-	                    "totalhigh_pages #1", RETURN_ON_ERROR)))
-	                        break;
-	                if (!(readmem(sp_array[1]->value, KVADDR,
-	                    &value2, sizeof(ulong),
-	                    "totalhigh_pages #2", RETURN_ON_ERROR)))
-	                        break;
-	                totalhigh_pages = MAX(value1, value2);
-	                break;
-	        }
+	if (symbol_exists("totalhigh_pages") ||
+	    symbol_exists("_totalhigh_pages")) {
+		totalhigh_pages = vt->totalhigh_pages;
 
 		pct = totalhigh_pages ?
 			(totalhigh_pages * 100)/totalram_pages : 0;
@@ -8719,6 +8764,12 @@ dump_vmap_area(struct meminfo *vi)
 	ld->list_head_offset = OFFSET(vmap_area_list);
 	ld->end = symbol_value("vmap_area_list");
 	cnt = do_list(ld);
+	if (cnt < 0) {
+		FREEBUF(vmap_area_buf);
+		error(WARNING, "invalid/corrupt vmap_area_list\n"); 
+		vi->retval = 0;
+		return;
+	}
 
 	for (i = 0; i < cnt; i++) {
 		if (!(pc->curcmd_flags & HEADER_PRINTED) && (i == 0) && 
@@ -8816,6 +8867,7 @@ dump_vmap_area(struct meminfo *vi)
 		}
 	}
 
+	FREEBUF(vmap_area_buf);
 	FREEBUF(ld->list_ptr);
 
 	if (vi->flags & GET_HIGHEST)
@@ -17102,13 +17154,22 @@ nr_to_section(ulong nr)
 
 /*
  * We use the lower bits of the mem_map pointer to store
- * a little bit of information.  There should be at least
- * 3 bits here due to 32-bit alignment.
+ * a little bit of information.  The pointer is calculated
+ * as mem_map - section_nr_to_pfn(pnum).  The result is
+ * aligned to the minimum alignment of the two values:
+ *   1. All mem_map arrays are page-aligned.
+ *   2. section_nr_to_pfn() always clears PFN_SECTION_SHIFT
+ *      lowest bits.  PFN_SECTION_SHIFT is arch-specific
+ *      (equal SECTION_SIZE_BITS - PAGE_SHIFT), and the
+ *      worst combination is powerpc with 256k pages,
+ *      which results in PFN_SECTION_SHIFT equal 6.
+ * To sum it up, at least 6 bits are available.
  */
 #define SECTION_MARKED_PRESENT	(1UL<<0)
 #define SECTION_HAS_MEM_MAP	(1UL<<1)
 #define SECTION_IS_ONLINE	(1UL<<2)
-#define SECTION_MAP_LAST_BIT	(1UL<<3)
+#define SECTION_IS_EARLY	(1UL<<3)
+#define SECTION_MAP_LAST_BIT	(1UL<<4)
 #define SECTION_MAP_MASK	(~(SECTION_MAP_LAST_BIT-1))
 
 
@@ -17205,6 +17266,8 @@ fill_mem_section_state(ulong state, char *buf)
 		bufidx += sprintf(buf + bufidx, "%s", "M");
 	if (state & SECTION_IS_ONLINE)
 		bufidx += sprintf(buf + bufidx, "%s", "O");
+	if (state & SECTION_IS_EARLY)
+		bufidx += sprintf(buf + bufidx, "%s", "E");
 }
 
 void 
@@ -17408,6 +17471,8 @@ init_memory_block_offset(void)
 				"subsys_private", "klist_devices");
 	MEMBER_OFFSET_INIT(klist_k_list, "klist", "k_list");
 	MEMBER_OFFSET_INIT(klist_node_n_node, "klist_node", "n_node");
+	MEMBER_OFFSET_INIT(device_kobj, "device", "kobj");
+	MEMBER_OFFSET_INIT(kobject_name, "kobject", "name");
 	MEMBER_OFFSET_INIT(device_private_knode_bus,
 				"device_private", "knode_bus");
 	MEMBER_OFFSET_INIT(device_private_device, "device_private", "device");
